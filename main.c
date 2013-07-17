@@ -28,7 +28,7 @@ static int setup_listen()
 
     if (bind(sockfd, (struct sockaddr *)&addr, sizeof(addr))) {
         fprintf(stderr, "%s, TCP bind failed for port number: %d", __FUNCTION__,
-        port);
+                port);
         return -1;
     }
 
@@ -51,20 +51,20 @@ int main()
     struct sockaddr_in addr;
     socklen_t addrlen = sizeof(struct sockaddr_in);
     int sockfd =
-	    accept(listenfd, (struct sockaddr *) &addr, &addrlen);
+        accept(listenfd, (struct sockaddr *) &addr, &addrlen);
 
     if (sockfd <= 0) {
-	    fprintf(stderr, "%s: accept failed", __FUNCTION__);
+        fprintf(stderr, "%s: accept failed", __FUNCTION__);
     }
 
-	struct sockaddr_in dest;
-	char destch[16];
+    struct sockaddr_in dest;
+    char destch[16];
     int sockflags;
-	socklen_t destlen = sizeof(struct sockaddr_in);
-	getsockopt(sockfd, SOL_IP, SO_ORIGINAL_DST, &dest, &destlen);
-	strcpy(destch, inet_ntoa(dest.sin_addr));
-	printf("%s: accepted connection from %s to %s\n", __FUNCTION__,
-	inet_ntoa(addr.sin_addr), destch);
+    socklen_t destlen = sizeof(struct sockaddr_in);
+    getsockopt(sockfd, SOL_IP, SO_ORIGINAL_DST, &dest, &destlen);
+    strcpy(destch, inet_ntoa(dest.sin_addr));
+    printf("%s: accepted connection from %s to %s\n", __FUNCTION__,
+           inet_ntoa(addr.sin_addr), destch);
     sockflags = fcntl(sockfd, F_GETFL, 0);
     fcntl(sockfd, F_SETFL, sockflags | O_NONBLOCK);
 
