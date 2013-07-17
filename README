@@ -1,0 +1,3 @@
+A non-blocking implementation of RTMP based off librtmp.
+Also delegates socket management to the application, to
+allow for integration with custom event loops.
