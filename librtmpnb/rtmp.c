@@ -3894,9 +3894,10 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
 int
 RTMP_Serve(RTMP *r)
 {
-    RTMP_HSState ret;
-    while ((ret = SHandShake(r))) {
-        if (CONNECTED == ret) break;
+    int ret;
+    while (CONNECTED != r->m_HSContext.state) {
+        ret = SHandShake(r);
+        if (ret == RTMP_NB_ERROR) break;
     }
     return ret;
 }
@@ -4041,9 +4042,8 @@ RTMPSockBuf_Fill(RTMPSockBuf *sb)
                 continue;
 
             if (sockerr == EWOULDBLOCK || sockerr == EAGAIN) {
-                sb->sb_timedout = TRUE;
-                nBytes = 0;
-            }
+                return RTMP_NB_EAGAIN;
+            } else return RTMP_NB_ERROR;
         }
         break;
     }

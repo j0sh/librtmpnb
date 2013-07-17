@@ -104,7 +104,11 @@ extern "C"
 
 #define RTMP_SIG_SIZE 1536
 
-    typedef enum { ERROR_STATE, HANDSHAKE_1, HANDSHAKE_2,
+#define RTMP_NB_OK      0
+#define RTMP_NB_EAGAIN -1
+#define RTMP_NB_ERROR  -2
+
+    typedef enum { HANDSHAKE_1, HANDSHAKE_2,
                    CONNECTED } RTMP_HSState;
     typedef struct RTMPHSContext {
         RTMP_HSState state;

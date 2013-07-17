@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <sys/fcntl.h>
 
 #include "librtmpnb/rtmp_sys.h"
 #include "librtmpnb/log.h"
@@ -58,16 +59,20 @@ int main()
 
 	struct sockaddr_in dest;
 	char destch[16];
+    int sockflags;
 	socklen_t destlen = sizeof(struct sockaddr_in);
 	getsockopt(sockfd, SOL_IP, SO_ORIGINAL_DST, &dest, &destlen);
 	strcpy(destch, inet_ntoa(dest.sin_addr));
 	printf("%s: accepted connection from %s to %s\n", __FUNCTION__,
 	inet_ntoa(addr.sin_addr), destch);
+    sockflags = fcntl(sockfd, F_GETFL, 0);
+    fcntl(sockfd, F_SETFL, sockflags | O_NONBLOCK);
 
+    RTMP_LogSetLevel(RTMP_LOGERROR);
     RTMP_Init(&rtmp);
     rtmp.m_sb.sb_socket = sockfd;
-    if (ERROR_STATE == RTMP_Serve(&rtmp)) {
-        fprintf(stderr, "Handshake failed");
+    if (RTMP_NB_OK != RTMP_Serve(&rtmp)) {
+        fprintf(stderr, "Handshake failed\n");
         goto cleanup;
     }
 

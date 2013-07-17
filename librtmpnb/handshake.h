@@ -1072,7 +1072,7 @@ HandShake(RTMP * r, int FP9HandShake)
     return TRUE;
 }
 
-static RTMP_HSState SHandShake1(RTMP *r) {
+static int SHandShake1(RTMP *r) {
     int i, offalg = 0;
     int dhposServer = 0;
     int digestPosServer = 0;
@@ -1089,13 +1089,20 @@ static RTMP_HSState SHandShake1(RTMP *r) {
     uint32_t uptime;
     getoff *getdh = NULL, *getdig = NULL;
 
-    r->m_HSContext.state = ERROR_STATE;
+    switch(RTMPSockBuf_Fill(&r->m_sb)) {
+    case RTMP_NB_ERROR: return RTMP_NB_ERROR;
+    case RTMP_NB_EAGAIN: return RTMP_NB_EAGAIN;
+    default:
+        if (r->m_sb.sb_size < RTMP_SIG_SIZE + 1) {
+            return RTMP_NB_EAGAIN;
+        }
+    }
 
     if (ReadN(r, (char *)&type, 1) != 1)	/* 0x03 or 0x06 */
-        return FALSE;
+        return RTMP_NB_ERROR;
 
     if (ReadN(r, (char *)clientsig, RTMP_SIG_SIZE) != RTMP_SIG_SIZE)
-        return FALSE;
+        return RTMP_NB_ERROR;
 
     RTMP_Log(RTMP_LOGDEBUG, "%s: Type Requested : %02X", __FUNCTION__, type);
     RTMP_LogHex(RTMP_LOGDEBUG2, clientsig, RTMP_SIG_SIZE);
@@ -1113,7 +1120,7 @@ static RTMP_HSState SHandShake1(RTMP *r) {
     } else {
         RTMP_Log(RTMP_LOGERROR, "%s: Unknown version %02x",
                  __FUNCTION__, type);
-        return FALSE;
+        return RTMP_NB_ERROR;
     }
 
     if (!FP9HandShake && clientsig[4])
@@ -1161,7 +1168,7 @@ static RTMP_HSState SHandShake1(RTMP *r) {
             if (!r->Link.dh) {
                 RTMP_Log(RTMP_LOGERROR, "%s: Couldn't initialize Diffie-Hellmann!",
                          __FUNCTION__);
-                return FALSE;
+                return RTMP_NB_ERROR;
             }
 
             dhposServer = getdh(serversig, RTMP_SIG_SIZE);
@@ -1170,13 +1177,13 @@ static RTMP_HSState SHandShake1(RTMP *r) {
             if (!DHGenerateKey(r->Link.dh)) {
                 RTMP_Log(RTMP_LOGERROR, "%s: Couldn't generate Diffie-Hellmann public key!",
                          __FUNCTION__);
-                return FALSE;
+                return RTMP_NB_ERROR;
             }
 
             if (!DHGetPublicKey
                     (r->Link.dh, (uint8_t *) &serversig[dhposServer], 128)) {
                 RTMP_Log(RTMP_LOGERROR, "%s: Couldn't write public key!", __FUNCTION__);
-                return FALSE;
+                return RTMP_NB_ERROR;
             }
         }
 
@@ -1197,7 +1204,7 @@ static RTMP_HSState SHandShake1(RTMP *r) {
     RTMP_LogHex(RTMP_LOGDEBUG2, serversig, RTMP_SIG_SIZE);
 
     if (!WriteN(r, (char *)serversig-1, RTMP_SIG_SIZE + 1))
-        return FALSE;
+        return RTMP_NB_ERROR;
 
     /* decode client response */
     memcpy(&uptime, clientsig, 4);
@@ -1224,7 +1231,7 @@ static RTMP_HSState SHandShake1(RTMP *r) {
 
             if (!VerifyDigest(digestPosClient, clientsig, GenuineFPKey, 30)) {
                 RTMP_Log(RTMP_LOGERROR, "Couldn't verify the client digest");	/* continuing anyway will probably fail */
-                return FALSE;
+                return RTMP_NB_ERROR;
             }
         }
 
@@ -1257,7 +1264,7 @@ static RTMP_HSState SHandShake1(RTMP *r) {
                                          secretKey);
             if (len < 0) {
                 RTMP_Log(RTMP_LOGDEBUG, "%s: Wrong secret key position!", __FUNCTION__);
-                return FALSE;
+                return RTMP_NB_ERROR;
             }
 
             RTMP_Log(RTMP_LOGDEBUG, "%s: Secret key: ", __FUNCTION__);
@@ -1317,13 +1324,13 @@ static RTMP_HSState SHandShake1(RTMP *r) {
     RTMP_LogHex(RTMP_LOGDEBUG2, clientsig, RTMP_SIG_SIZE);
 
     if (!WriteN(r, (char *)clientsig, RTMP_SIG_SIZE))
-        return FALSE;
+        return RTMP_NB_ERROR;
 
     r->m_HSContext.state = HANDSHAKE_2;
-    return r->m_HSContext.state;
+    return RTMP_NB_OK;
 }
 
-static RTMP_HSState SHandShake2(RTMP *r)
+static int SHandShake2(RTMP *r)
 {
     int i;
     int digestPosServer = r->m_HSContext.digestPosServer;
@@ -1335,11 +1342,18 @@ static RTMP_HSState SHandShake2(RTMP *r)
     uint8_t *serversig = serverbuf + 4;
     uint8_t type = r->m_HSContext.type;
 
-    r->m_HSContext.state = ERROR_STATE;
+    switch(RTMPSockBuf_Fill(&r->m_sb)) {
+    case RTMP_NB_ERROR: return RTMP_NB_ERROR;
+    case RTMP_NB_EAGAIN: return RTMP_NB_EAGAIN;
+    default:
+        if (r->m_sb.sb_size < RTMP_SIG_SIZE) {
+            return RTMP_NB_EAGAIN;
+        }
+    }
 
     /* 2nd part of handshake */
     if (ReadN(r, (char *)clientsig, RTMP_SIG_SIZE) != RTMP_SIG_SIZE)
-        return FALSE;
+        return RTMP_NB_ERROR;
 
     RTMP_Log(RTMP_LOGDEBUG2, "%s: 2nd handshake: ", __FUNCTION__);
     RTMP_LogHex(RTMP_LOGDEBUG2, clientsig, RTMP_SIG_SIZE);
@@ -1384,7 +1398,7 @@ static RTMP_HSState SHandShake2(RTMP *r)
                  SHA256_DIGEST_LENGTH) != 0) {
             // common (non-adobe) clients will fail, and we don't care
             //RTMP_Log(RTMP_LOGWARNING, "%s: Client not genuine Adobe!", __FUNCTION__);
-            //return FALSE;
+            //return RTMP_ERROR;
         } else {
             RTMP_Log(RTMP_LOGDEBUG, "%s: Genuine Adobe Flash Player", __FUNCTION__);
         }
@@ -1413,7 +1427,7 @@ static RTMP_HSState SHandShake2(RTMP *r)
 
     RTMP_Log(RTMP_LOGDEBUG, "%s: Handshaking finished....", __FUNCTION__);
     r->m_HSContext.state = CONNECTED;
-    return r->m_HSContext.state;
+    return RTMP_NB_OK;
 }
 
 static int
@@ -1422,7 +1436,7 @@ SHandShake(RTMP * r)
     switch (r->m_HSContext.state) {
         case HANDSHAKE_1: return SHandShake1(r);
         case HANDSHAKE_2: return SHandShake2(r);
-        default: return ERROR_STATE;
+        default: return RTMP_NB_ERROR;
     }
 }
 
