@@ -340,6 +340,7 @@ RTMP_Init(RTMP *r)
   r->m_fVideoCodecs = 252.0;
   r->Link.timeout = 30;
   r->Link.swfAge = 30;
+  r->m_state = HANDSHAKE_1;
 }
 
 void
