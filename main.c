@@ -66,7 +66,7 @@ int main()
 
     RTMP_Init(&rtmp);
     rtmp.m_sb.sb_socket = sockfd;
-    if (!RTMP_Serve(&rtmp)) {
+    if (ERROR_STATE == RTMP_Serve(&rtmp)) {
         fprintf(stderr, "Handshake failed");
         goto cleanup;
     }

@@ -66,7 +66,6 @@ static const char *my_dhm_G = "4";
 TLS_CTX RTMP_TLS_ctx;
 #endif
 
-#define RTMP_SIG_SIZE 1536
 #define RTMP_LARGE_HEADER_SIZE 12
 
 static const int packetSize[] = { 12, 8, 4, 1 };
@@ -339,7 +338,7 @@ RTMP_Init(RTMP *r)
     r->m_fVideoCodecs = 252.0;
     r->Link.timeout = 30;
     r->Link.swfAge = 30;
-    r->m_state = HANDSHAKE_1;
+    r->m_HSContext.state = HANDSHAKE_1;
 }
 
 void
@@ -3895,7 +3894,11 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
 int
 RTMP_Serve(RTMP *r)
 {
-    return SHandShake(r);
+    RTMP_HSState ret;
+    while ((ret = SHandShake(r))) {
+        if (CONNECTED == ret) break;
+    }
+    return ret;
 }
 
 void

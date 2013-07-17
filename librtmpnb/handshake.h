@@ -1072,9 +1072,7 @@ HandShake(RTMP * r, int FP9HandShake)
     return TRUE;
 }
 
-static int
-SHandShake(RTMP * r)
-{
+static RTMP_HSState SHandShake1(RTMP *r) {
     int i, offalg = 0;
     int dhposServer = 0;
     int digestPosServer = 0;
@@ -1085,10 +1083,13 @@ SHandShake(RTMP * r)
     int32_t *ip;
 
     uint8_t clientsig[RTMP_SIG_SIZE];
-    uint8_t serverbuf[RTMP_SIG_SIZE + 4], *serversig = serverbuf+4;
+    uint8_t *serverbuf = r->m_HSContext.serverbuf;
+    uint8_t *serversig = serverbuf + 4;
     uint8_t type;
     uint32_t uptime;
     getoff *getdh = NULL, *getdig = NULL;
+
+    r->m_HSContext.state = ERROR_STATE;
 
     if (ReadN(r, (char *)&type, 1) != 1)	/* 0x03 or 0x06 */
         return FALSE;
@@ -1120,10 +1121,15 @@ SHandShake(RTMP * r)
 
     serversig[-1] = type;
 
+    r->m_HSContext.keyIn = r->m_HSContext.keyOut = 0;
     r->Link.rc4keyIn = r->Link.rc4keyOut = 0;
 
     uptime = htonl(RTMP_GetTime());
     memcpy(serversig, &uptime, 4);
+
+    r->m_HSContext.type = type;
+    r->m_HSContext.fp9 = FP9HandShake;
+    r->m_HSContext.encrypted = encrypted;
 
     if (FP9HandShake) {
         /* Server version */
@@ -1184,6 +1190,7 @@ SHandShake(RTMP * r)
         RTMP_Log(RTMP_LOGDEBUG, "%s: Initial server digest: ", __FUNCTION__);
         RTMP_LogHex(RTMP_LOGDEBUG, serversig + digestPosServer,
                     SHA256_DIGEST_LENGTH);
+        r->m_HSContext.digestPosServer = digestPosServer;
     }
 
     RTMP_Log(RTMP_LOGDEBUG2, "Serversig: ");
@@ -1259,7 +1266,10 @@ SHandShake(RTMP * r)
             InitRC4Encryption(secretKey,
                               (uint8_t *) &clientsig[dhposClient],
                               (uint8_t *) &serversig[dhposServer],
-                              &keyIn, &keyOut);
+                              &keyIn,
+                              &keyOut);
+            r->m_HSContext.keyIn = keyIn;
+            r->m_HSContext.keyOut = keyOut;
         }
 
 
@@ -1308,6 +1318,24 @@ SHandShake(RTMP * r)
 
     if (!WriteN(r, (char *)clientsig, RTMP_SIG_SIZE))
         return FALSE;
+
+    r->m_HSContext.state = HANDSHAKE_2;
+    return r->m_HSContext.state;
+}
+
+static RTMP_HSState SHandShake2(RTMP *r)
+{
+    int i;
+    int digestPosServer = r->m_HSContext.digestPosServer;
+    int FP9HandShake = r->m_HSContext.fp9;
+    int encrypted = r->m_HSContext.encrypted;
+
+    uint8_t clientsig[RTMP_SIG_SIZE];
+    uint8_t *serverbuf = r->m_HSContext.serverbuf;
+    uint8_t *serversig = serverbuf + 4;
+    uint8_t type = r->m_HSContext.type;
+
+    r->m_HSContext.state = ERROR_STATE;
 
     /* 2nd part of handshake */
     if (ReadN(r, (char *)clientsig, RTMP_SIG_SIZE) != RTMP_SIG_SIZE)
@@ -1364,8 +1392,8 @@ SHandShake(RTMP * r)
         if (encrypted) {
             char buff[RTMP_SIG_SIZE];
             /* set keys for encryption from now on */
-            r->Link.rc4keyIn = keyIn;
-            r->Link.rc4keyOut = keyOut;
+            r->Link.rc4keyIn = r->m_HSContext.keyIn;
+            r->Link.rc4keyOut = r->m_HSContext.keyOut;
 
             /* update the keystreams */
             if (r->Link.rc4keyIn) {
@@ -1384,5 +1412,18 @@ SHandShake(RTMP * r)
     }
 
     RTMP_Log(RTMP_LOGDEBUG, "%s: Handshaking finished....", __FUNCTION__);
-    return TRUE;
+    r->m_HSContext.state = CONNECTED;
+    return r->m_HSContext.state;
 }
+
+static int
+SHandShake(RTMP * r)
+{
+    switch (r->m_HSContext.state) {
+        case HANDSHAKE_1: return SHandShake1(r);
+        case HANDSHAKE_2: return SHandShake2(r);
+        default: return ERROR_STATE;
+    }
+}
+
+
