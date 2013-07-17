@@ -1378,8 +1378,9 @@ SHandShake(RTMP * r)
 	  (signature, &clientsig[RTMP_SIG_SIZE - SHA256_DIGEST_LENGTH],
 	   SHA256_DIGEST_LENGTH) != 0)
 	{
-	  RTMP_Log(RTMP_LOGWARNING, "%s: Client not genuine Adobe!", __FUNCTION__);
-	  return FALSE;
+        // common (non-adobe) clients will fail, and we don't care
+        //RTMP_Log(RTMP_LOGWARNING, "%s: Client not genuine Adobe!", __FUNCTION__);
+        //return FALSE;
 	}
       else
 	{
