@@ -107,6 +107,8 @@ extern "C"
 #define RTMP_NB_OK      0
 #define RTMP_NB_EAGAIN -1
 #define RTMP_NB_ERROR  -2
+#define RTMP_NB_HNDSHK -3
+#define RTMP_NB_CHUNK  -4
 
     typedef enum { HANDSHAKE_1, HANDSHAKE_2,
                    CONNECTED } RTMP_HSState;

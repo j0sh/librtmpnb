@@ -1358,6 +1358,51 @@ extern FILE *netstackdump;
 extern FILE *netstackdump_read;
 #endif
 
+typedef struct RTMPSockBufView {
+    int sb_read;
+    int sb_size;		/* number of unprocessed bytes in buffer */
+    char *sb_start;		/* pointer into sb_pBuffer of next byte to process */
+    char *sb_buf;	    /* data read from socket */
+    void *sb_ssl;
+} RTMPSockBufView;
+
+static int
+ReadN2(RTMP *r, RTMPSockBufView *v, char *buffer, int n)
+{
+    if (v->sb_size < n) return RTMP_NB_EAGAIN;
+
+#ifdef _DEBUG
+    memset(buffer, 0, n);
+#endif
+
+    if (r->Link.protocol & RTMP_FEATURE_HTTP) {
+        // unsupported atm
+        RTMP_Log(RTMP_LOGERROR, "%s, HTTP not supported\n",
+                 __FUNCTION__);
+        return RTMP_NB_ERROR;
+    }
+
+    memcpy(buffer, v->sb_start, n);
+    v->sb_start += n;
+    v->sb_size -= n;
+    v->sb_read += n;
+    /*RTMP_Log(RTMP_LOGDEBUG, "%s: %d bytes\n", __FUNCTION__, nBytes); */
+#ifdef _DEBUG
+    fwrite(buffer, 1, n, netstackdump_read);
+#endif
+
+    if (r->Link.protocol & RTMP_FEATURE_HTTP)
+        ;//r->m_resplen -= nBytes;
+
+#ifdef CRYPTO
+    if (r->Link.rc4keyIn) {
+        RC4_encrypt(r->Link.rc4keyIn, n, buffer);
+    }
+#endif
+
+    return n;
+}
+
 static int
 ReadN(RTMP *r, char *buffer, int n)
 {
@@ -3386,38 +3431,72 @@ EncodeInt32LE(char *output, int nVal)
     return 4;
 }
 
+static void RTMPSockBuf_SetView(RTMPSockBuf *sb, RTMPSockBufView *v)
+{
+    v->sb_read = 0;
+    v->sb_size = sb->sb_size;
+    v->sb_start = sb->sb_start;
+    v->sb_buf = sb->sb_buf;
+    v->sb_ssl = sb->sb_ssl;
+}
+
+static int RTMPSockBuf_Flush(RTMP *r, RTMPSockBufView *v)
+{
+    int toflush = v->sb_read;
+    if (v->sb_read > r->m_sb.sb_size) {
+        RTMP_Log(RTMP_LOGWARNING, "%s, SockBufView (%d) larger than "
+                 "SockBuf (%d)\n", __FUNCTION__, v->sb_read, v->sb_size);
+        toflush = r->m_sb.sb_size;
+    }
+    if (toflush <= 0) return RTMP_NB_ERROR;
+    v->sb_read = 0;
+    r->m_sb.sb_start += toflush;
+    r->m_sb.sb_size -= toflush;
+    r->m_nBytesIn += toflush;
+    if (r->m_bSendCounter &&
+        r->m_nBytesIn > ( r->m_nBytesInSent + r->m_nClientBW / 10)) {
+        if (!SendBytesReceived(r)) return RTMP_NB_ERROR;
+    }
+    return RTMP_NB_OK;
+}
+
 int
 RTMP_ReadPacket(RTMP *r, RTMPPacket *packet)
 {
     uint8_t hbuf[RTMP_MAX_HEADER_SIZE] = { 0 };
     char *header = (char *)hbuf;
-    int nSize, hSize, nToRead, nChunk;
+    int nSize, hSize, nToRead, nChunk, ret;
+    RTMPSockBufView sbv;
 
     RTMP_Log(RTMP_LOGDEBUG2, "%s: fd=%d", __FUNCTION__, r->m_sb.sb_socket);
 
-    if (ReadN(r, (char *)hbuf, 1) == 0) {
+    ret = RTMPSockBuf_Fill(&r->m_sb);
+    if (RTMP_NB_ERROR == ret || r->m_sb.sb_size <= 0) return ret;
+    RTMPSockBuf_SetView(&r->m_sb, &sbv);
+
+    if ((ret = ReadN2(r, &sbv, (char *)hbuf, 1)) != 1) {
         RTMP_Log(RTMP_LOGERROR, "%s, failed to read RTMP packet header", __FUNCTION__);
-        return FALSE;
+        return ret;
     }
 
     packet->m_headerType = (hbuf[0] & 0xc0) >> 6;
     packet->m_nChannel = (hbuf[0] & 0x3f);
     header++;
     if (packet->m_nChannel == 0) {
-        if (ReadN(r, (char *)&hbuf[1], 1) != 1) {
+        if ((ret = ReadN2(r, &sbv, (char *)&hbuf[1], 1)) != 1) {
             RTMP_Log(RTMP_LOGERROR, "%s, failed to read RTMP packet header 2nd byte",
                      __FUNCTION__);
-            return FALSE;
+            return ret;
         }
         packet->m_nChannel = hbuf[1];
         packet->m_nChannel += 64;
         header++;
     } else if (packet->m_nChannel == 1) {
         int tmp;
-        if (ReadN(r, (char *)&hbuf[1], 2) != 2) {
+        if ((ret = ReadN2(r, &sbv, (char *)&hbuf[1], 2)) != 2) {
             RTMP_Log(RTMP_LOGERROR, "%s, failed to read RTMP packet header 3nd byte",
                      __FUNCTION__);
-            return FALSE;
+            return ret;
         }
         tmp = (hbuf[2] << 8) + hbuf[1];
         packet->m_nChannel = tmp + 64;
@@ -3439,7 +3518,7 @@ RTMP_ReadPacket(RTMP *r, RTMPPacket *packet)
         r->m_vecChannelsIn = packets;
         if (!timestamp || !packets) {
             r->m_channelsAllocatedIn = 0;
-            return FALSE;
+            return RTMP_NB_ERROR;
         }
         memset(r->m_channelTimestamp + r->m_channelsAllocatedIn, 0, sizeof(int) * (n - r->m_channelsAllocatedIn));
         memset(r->m_vecChannelsIn + r->m_channelsAllocatedIn, 0, sizeof(RTMPPacket*) * (n - r->m_channelsAllocatedIn));
@@ -3458,10 +3537,10 @@ RTMP_ReadPacket(RTMP *r, RTMPPacket *packet)
 
     nSize--;
 
-    if (nSize > 0 && ReadN(r, header, nSize) != nSize) {
+    if (nSize > 0 && (ret = ReadN2(r, &sbv, header, nSize)) != nSize) {
         RTMP_Log(RTMP_LOGERROR, "%s, failed to read RTMP packet header. type: %x",
                  __FUNCTION__, (unsigned int)hbuf[0]);
-        return FALSE;
+        return ret;
     }
 
     hSize = nSize + (header - (char *)hbuf);
@@ -3487,7 +3566,7 @@ RTMP_ReadPacket(RTMP *r, RTMPPacket *packet)
             if (ReadN(r, header + nSize, 4) != 4) {
                 RTMP_Log(RTMP_LOGERROR, "%s, failed to read extended timestamp",
                          __FUNCTION__);
-                return FALSE;
+                return RTMP_NB_ERROR;
             }
             packet->m_nTimeStamp = AMF_DecodeInt32(header + nSize);
             hSize += 4;
@@ -3498,8 +3577,8 @@ RTMP_ReadPacket(RTMP *r, RTMPPacket *packet)
 
     if (packet->m_nBodySize > 0 && packet->m_body == NULL) {
         if (!RTMPPacket_Alloc(packet, packet->m_nBodySize)) {
-            RTMP_Log(RTMP_LOGDEBUG, "%s, failed to allocate packet", __FUNCTION__);
-            return FALSE;
+            RTMP_Log(RTMP_LOGERROR, "%s, failed to allocate packet", __FUNCTION__);
+            return RTMP_NB_ERROR;
         }
         packet->m_headerType = (hbuf[0] & 0xc0) >> 6;
     }
@@ -3517,10 +3596,10 @@ RTMP_ReadPacket(RTMP *r, RTMPPacket *packet)
         packet->m_chunk->c_chunkSize = nChunk;
     }
 
-    if (ReadN(r, packet->m_body + packet->m_nBytesRead, nChunk) != nChunk) {
+    if ((ret = ReadN2(r, &sbv, packet->m_body + packet->m_nBytesRead, nChunk)) != nChunk) {
         RTMP_Log(RTMP_LOGERROR, "%s, failed to read RTMP packet body. len: %u",
                  __FUNCTION__, packet->m_nBodySize);
-        return FALSE;
+        return ret;
     }
 
     RTMP_LogHexString(RTMP_LOGDEBUG2, (uint8_t *)packet->m_body + packet->m_nBytesRead, nChunk);
@@ -3548,7 +3627,9 @@ RTMP_ReadPacket(RTMP *r, RTMPPacket *packet)
         packet->m_body = NULL;	/* so it won't be erased on free */
     }
 
-    return TRUE;
+    if (RTMP_NB_OK != (ret = RTMPSockBuf_Flush(r, &sbv))) return ret;
+    if (!RTMPPacket_IsReady(packet)) return RTMP_NB_CHUNK;
+    return RTMP_NB_OK;
 }
 
 #ifndef CRYPTO
@@ -3892,9 +3973,22 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
 }
 
 int
+RTMP_ServeNB(RTMP *r, RTMPPacket *pkt)
+{
+    if (CONNECTED != r->m_HSContext.state) {
+        int ret = SHandShake(r);
+        if (RTMP_NB_ERROR == ret) return ret;
+        if (CONNECTED == r->m_HSContext.state) return RTMP_NB_HNDSHK;
+        return RTMP_NB_EAGAIN;
+    }
+    if (RTMP_IsConnected(r)) return RTMP_ReadPacket(r, pkt);
+    return RTMP_NB_ERROR;
+}
+
+int
 RTMP_Serve(RTMP *r)
 {
-    int ret;
+    int ret = RTMP_NB_ERROR;
     while (CONNECTED != r->m_HSContext.state) {
         ret = SHandShake(r);
         if (ret == RTMP_NB_ERROR) break;
@@ -4033,6 +4127,7 @@ RTMPSockBuf_Fill(RTMPSockBuf *sb)
             nBytes = recv(sb->sb_socket, sb->sb_start + sb->sb_size, nBytes, 0);
         }
         if (nBytes != -1) {
+            if (!nBytes) return RTMP_NB_ERROR;
             sb->sb_size += nBytes;
         } else {
             int sockerr = GetSockError();
