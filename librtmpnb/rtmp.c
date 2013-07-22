@@ -107,6 +107,18 @@ typedef enum {
     RTMPT_OPEN=0, RTMPT_SEND, RTMPT_IDLE, RTMPT_CLOSE
 } RTMPTCmd;
 
+typedef struct RTMPSockBufView {
+    int sb_read;
+    int sb_size;		/* number of unprocessed bytes in buffer */
+    char *sb_start;		/* pointer into sb_pBuffer of next byte to process */
+    char *sb_buf;	    /* data read from socket */
+    void *sb_ssl;
+} RTMPSockBufView;
+
+static int ReadN2(RTMP *r, RTMPSockBufView *v, char *buffer, int n);
+static int RTMPSockBuf_Flush(RTMP *r, RTMPSockBufView *v);
+static void RTMPSockBuf_SetView(RTMPSockBuf *sb, RTMPSockBufView *v);
+
 static int DumpMetaData(AMFObject *obj);
 static int HandShake(RTMP *r, int FP9HandShake);
 static int SocksNegotiate(RTMP *r);
@@ -1357,14 +1369,6 @@ RTMP_ClientPacket(RTMP *r, RTMPPacket *packet)
 extern FILE *netstackdump;
 extern FILE *netstackdump_read;
 #endif
-
-typedef struct RTMPSockBufView {
-    int sb_read;
-    int sb_size;		/* number of unprocessed bytes in buffer */
-    char *sb_start;		/* pointer into sb_pBuffer of next byte to process */
-    char *sb_buf;	    /* data read from socket */
-    void *sb_ssl;
-} RTMPSockBufView;
 
 static int
 ReadN2(RTMP *r, RTMPSockBufView *v, char *buffer, int n)

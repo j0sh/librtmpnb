@@ -1073,7 +1073,7 @@ HandShake(RTMP * r, int FP9HandShake)
 }
 
 static int SHandShake1(RTMP *r) {
-    int i, offalg = 0;
+    int i, ret, offalg = 0;
     int dhposServer = 0;
     int digestPosServer = 0;
     RC4_handle keyIn = 0;
@@ -1088,21 +1088,18 @@ static int SHandShake1(RTMP *r) {
     uint8_t type;
     uint32_t uptime;
     getoff *getdh = NULL, *getdig = NULL;
+    RTMPSockBufView sbv;
 
-    switch(RTMPSockBuf_Fill(&r->m_sb)) {
-    case RTMP_NB_ERROR: return RTMP_NB_ERROR;
-    case RTMP_NB_EAGAIN: return RTMP_NB_EAGAIN;
-    default:
-        if (r->m_sb.sb_size < RTMP_SIG_SIZE + 1) {
-            return RTMP_NB_EAGAIN;
-        }
-    }
+    ret = RTMPSockBuf_Fill(&r->m_sb);
+    if (RTMP_NB_ERROR == ret || r->m_sb.sb_size <= 0) return ret;
+    RTMPSockBuf_SetView(&r->m_sb, &sbv);
 
-    if (ReadN(r, (char *)&type, 1) != 1)	/* 0x03 or 0x06 */
-        return RTMP_NB_ERROR;
+    if ((ret = ReadN2(r, &sbv, (char *)&type, 1)) != 1) /* 0x03 or 0x06 */
+        return ret;
 
-    if (ReadN(r, (char *)clientsig, RTMP_SIG_SIZE) != RTMP_SIG_SIZE)
-        return RTMP_NB_ERROR;
+    if ((ret = ReadN2(r, &sbv, (char *)clientsig, RTMP_SIG_SIZE)) !=
+         RTMP_SIG_SIZE)
+        return ret;
 
     RTMP_Log(RTMP_LOGDEBUG, "%s: Type Requested : %02X", __FUNCTION__, type);
     RTMP_LogHex(RTMP_LOGDEBUG2, clientsig, RTMP_SIG_SIZE);
@@ -1327,12 +1324,13 @@ static int SHandShake1(RTMP *r) {
         return RTMP_NB_ERROR;
 
     r->m_HSContext.state = HANDSHAKE_2;
+    if (RTMP_NB_OK != (ret = RTMPSockBuf_Flush(r, &sbv))) return ret;
     return RTMP_NB_OK;
 }
 
 static int SHandShake2(RTMP *r)
 {
-    int i;
+    int i, ret;
     int digestPosServer = r->m_HSContext.digestPosServer;
     int FP9HandShake = r->m_HSContext.fp9;
     int encrypted = r->m_HSContext.encrypted;
@@ -1341,19 +1339,16 @@ static int SHandShake2(RTMP *r)
     uint8_t *serverbuf = r->m_HSContext.serverbuf;
     uint8_t *serversig = serverbuf + 4;
     uint8_t type = r->m_HSContext.type;
+    RTMPSockBufView sbv;
 
-    switch(RTMPSockBuf_Fill(&r->m_sb)) {
-    case RTMP_NB_ERROR: return RTMP_NB_ERROR;
-    case RTMP_NB_EAGAIN: return RTMP_NB_EAGAIN;
-    default:
-        if (r->m_sb.sb_size < RTMP_SIG_SIZE) {
-            return RTMP_NB_EAGAIN;
-        }
-    }
+    ret = RTMPSockBuf_Fill(&r->m_sb);
+    if (RTMP_NB_ERROR == ret || r->m_sb.sb_size <= 0) return ret;
+    RTMPSockBuf_SetView(&r->m_sb, &sbv);
 
     /* 2nd part of handshake */
-    if (ReadN(r, (char *)clientsig, RTMP_SIG_SIZE) != RTMP_SIG_SIZE)
-        return RTMP_NB_ERROR;
+    if ((ret = ReadN2(r, &sbv, (char *)clientsig, RTMP_SIG_SIZE)) !=
+         RTMP_SIG_SIZE)
+        return ret;
 
     RTMP_Log(RTMP_LOGDEBUG2, "%s: 2nd handshake: ", __FUNCTION__);
     RTMP_LogHex(RTMP_LOGDEBUG2, clientsig, RTMP_SIG_SIZE);
@@ -1427,6 +1422,7 @@ static int SHandShake2(RTMP *r)
 
     RTMP_Log(RTMP_LOGDEBUG, "%s: Handshaking finished....", __FUNCTION__);
     r->m_HSContext.state = CONNECTED;
+    if (RTMP_NB_OK != (ret = RTMPSockBuf_Flush(r, &sbv))) return ret;
     return RTMP_NB_OK;
 }
 
