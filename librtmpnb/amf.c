@@ -766,8 +766,10 @@ AMFProp_Dump(AMFObjectProperty *prop)
     if (prop->p_name.av_len) {
         name = prop->p_name;
     } else {
-        name.av_val = "no-name.";
-        name.av_len = sizeof("no-name.") - 1;
+        //name.av_val = "no-name.";
+        //name.av_len = sizeof("no-name.") - 1;
+        name.av_val = "";
+        name.av_len = 0;
     }
     if (name.av_len > 18)
         name.av_len = 18;
