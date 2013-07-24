@@ -3474,8 +3474,6 @@ RTMP_ReadPacket(RTMP *r, RTMPPacket *packet)
 
     RTMP_Log(RTMP_LOGDEBUG2, "%s: fd=%d", __FUNCTION__, r->m_sb.sb_socket);
 
-    ret = RTMPSockBuf_Fill(&r->m_sb);
-    if (RTMP_NB_ERROR == ret || r->m_sb.sb_size <= 0) return ret;
     RTMPSockBuf_SetView(&r->m_sb, &sbv);
 
     if ((ret = ReadN2(r, &sbv, (char *)hbuf, 1)) != 1) {

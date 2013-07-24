@@ -1090,8 +1090,6 @@ static int SHandShake1(RTMP *r) {
     getoff *getdh = NULL, *getdig = NULL;
     RTMPSockBufView sbv;
 
-    ret = RTMPSockBuf_Fill(&r->m_sb);
-    if (RTMP_NB_ERROR == ret || r->m_sb.sb_size <= 0) return ret;
     RTMPSockBuf_SetView(&r->m_sb, &sbv);
 
     if ((ret = ReadN2(r, &sbv, (char *)&type, 1)) != 1) /* 0x03 or 0x06 */
@@ -1341,8 +1339,6 @@ static int SHandShake2(RTMP *r)
     uint8_t type = r->m_HSContext.type;
     RTMPSockBufView sbv;
 
-    ret = RTMPSockBuf_Fill(&r->m_sb);
-    if (RTMP_NB_ERROR == ret || r->m_sb.sb_size <= 0) return ret;
     RTMPSockBuf_SetView(&r->m_sb, &sbv);
 
     /* 2nd part of handshake */

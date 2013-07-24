@@ -266,6 +266,8 @@ static int serve(RTMP *r)
         }
         if (!FD_ISSET(r->m_sb.sb_socket, &rset)) continue;
         if (!RTMP_IsConnected(r)) goto serve_cleanup;
+        ret = RTMPSockBuf_Fill(&r->m_sb);
+        if (RTMP_NB_ERROR == ret || r->m_sb.sb_size <= 0) goto serve_error;
 srv_loop:
         ret = RTMP_ServeNB(r, &pkt);
         switch(ret) {
