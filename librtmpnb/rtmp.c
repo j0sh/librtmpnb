@@ -1386,7 +1386,14 @@ ReadN2(RTMP *r, RTMPSockBufView *v, char *buffer, int n)
         return RTMP_NB_ERROR;
     }
 
-    memcpy(buffer, v->sb_start, n);
+    if (!r->Link.rc4keyIn || r->m_decrypted <= nb_read) {
+        // buffer should already have data from the
+        // last round. usually relevant for headers that
+        // are going around again if the body eagain'd.
+        // mostly important for rtmpe to preserve rc4 state
+        // vanilla rtmp is probably doing extra work; FIXME
+        memcpy(buffer, v->sb_start, n);
+    }
     v->sb_start += n;
     v->sb_size -= n;
     v->sb_read += n;
@@ -1399,8 +1406,9 @@ ReadN2(RTMP *r, RTMPSockBufView *v, char *buffer, int n)
         ;//r->m_resplen -= nBytes;
 
 #ifdef CRYPTO
-    if (r->Link.rc4keyIn) {
+    if (r->Link.rc4keyIn && r->m_decrypted <= nb_read) {
         RC4_encrypt(r->Link.rc4keyIn, n, buffer);
+        r->m_decrypted += n;
     }
 #endif
 
@@ -3454,6 +3462,7 @@ static int RTMPSockBuf_Flush(RTMP *r, RTMPSockBufView *v)
     }
     if (toflush <= 0) return RTMP_NB_ERROR;
     v->sb_read = 0;
+    r->m_decrypted = 0;
     r->m_sb.sb_start += toflush;
     r->m_sb.sb_size -= toflush;
     r->m_nBytesIn += toflush;
@@ -3467,7 +3476,7 @@ static int RTMPSockBuf_Flush(RTMP *r, RTMPSockBufView *v)
 int
 RTMP_ReadPacket(RTMP *r, RTMPPacket *packet)
 {
-    uint8_t hbuf[RTMP_MAX_HEADER_SIZE] = { 0 };
+    uint8_t *hbuf = r->hbuf;
     char *header = (char *)hbuf;
     int nSize, hSize, nToRead, nChunk, ret;
     RTMPSockBufView sbv;
