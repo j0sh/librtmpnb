@@ -1373,6 +1373,12 @@ extern FILE *netstackdump_read;
 static int
 ReadN2(RTMP *r, RTMPSockBufView *v, char *buffer, int n)
 {
+    int nb_read = v->sb_read;
+    if (n < 0 || !buffer) {
+        RTMP_Log(RTMP_LOGERROR, "%s requested %d bytes, buffer %p",
+                 __FUNCTION__, n, buffer);
+        return RTMP_NB_ERROR;
+    }
     if (v->sb_size < n) return RTMP_NB_EAGAIN;
 
 #ifdef _DEBUG
@@ -3607,9 +3613,10 @@ RTMP_ReadPacket(RTMP *r, RTMPPacket *packet)
         packet->m_chunk->c_chunkSize = nChunk;
     }
 
-    if ((ret = ReadN2(r, &sbv, packet->m_body + packet->m_nBytesRead, nChunk)) != nChunk) {
         RTMP_Log(RTMP_LOGERROR, "%s, failed to read RTMP packet body. len: %u",
                  __FUNCTION__, packet->m_nBodySize);
+    if (!RTMPPacket_IsReady(packet) &&  // skip zero-length packets
+        (ret = ReadN2(r, &sbv, packet->m_body + packet->m_nBytesRead, nChunk)) != nChunk) {
         return ret;
     }
 
