@@ -9,11 +9,10 @@
 #include <linux/netfilter_ipv4.h>
 #endif
 
-static int setup_listen()
+static int setup_listen(int port)
 {
     struct sockaddr_in addr;
     int sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), tmp = 1;
-    int port = 1935;
     char *iface = "0.0.0.0";
 
     if (-1 == sockfd) {
@@ -294,7 +293,7 @@ int main()
 {
     RTMP rtmp;
     memset(&rtmp, 0, sizeof(RTMP));
-    int listenfd = setup_listen();
+    int listenfd = setup_listen(1935);
 
     if (listenfd < 0) return 0;
 
