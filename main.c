@@ -316,13 +316,15 @@ int main()
 {
     RTMP rtmps[MAXC];
     memset(rtmps, 0, sizeof(rtmps));
-    int listenfd = setup_listen(1935);
-    int socks[MAXC], nb_socks = 0, i, smax = listenfd;
+    int rtmpfd = setup_listen(1935);
+    int httpfd = setup_listen(8080);
+    int socks[MAXC], nb_socks = 0, i, smax = httpfd, nb_listeners = 2;
     fd_set rset;
 
-    if (listenfd < 0) return 0;
+    if (httpfd < 0 || rtmpfd < 0) return 0;
     memset(socks, -1, sizeof(socks));
-    socks[nb_socks++] = listenfd;
+    socks[nb_socks++] = rtmpfd;
+    socks[nb_socks++] = httpfd;
 
     RTMP_LogSetLevel(RTMP_LOGDEBUG);
 while (1) {
@@ -336,9 +338,11 @@ while (1) {
     ret = select(smax + 1, &rset, NULL, NULL, &t);
     if (-1 == ret) goto cleanup;
 
-    // check acceptor
-    if (!FD_ISSET(listenfd, &rset)) goto check_clients;
-    sockfd = accept(listenfd, (struct sockaddr *) &addr, &addrlen);
+    // check listeners
+    for (i = 0; i < nb_listeners; i++) {
+        int lfd = socks[i];
+        if (!FD_ISSET(lfd, &rset)) continue;
+        sockfd = accept(lfd, (struct sockaddr *) &addr, &addrlen);
     if (sockfd <= 0 && EAGAIN != errno) {
         fprintf(stderr, "%s: accept failed", __FUNCTION__);
     } else if (sockfd >= 0) {
@@ -347,10 +351,11 @@ while (1) {
         nb_socks++;
         smax = sockfd > smax ? sockfd : smax;
     }
+    }
 
-check_clients:
+    // check clients
     old_nb = nb_socks;
-    for (i = 1; i < old_nb; i++) { // 1 is the acceptor; skip
+    for (i = nb_listeners; i < old_nb; i++) {
         RTMP *r = &rtmps[i];
         if (-1 == socks[i] ||!FD_ISSET(socks[i], &rset)) continue;
         if (RTMP_NB_ERROR != serve_client(r)) continue;
