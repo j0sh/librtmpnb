@@ -343,14 +343,14 @@ while (1) {
         int lfd = socks[i];
         if (!FD_ISSET(lfd, &rset)) continue;
         sockfd = accept(lfd, (struct sockaddr *) &addr, &addrlen);
-    if (sockfd <= 0 && EAGAIN != errno) {
-        fprintf(stderr, "%s: accept failed", __FUNCTION__);
-    } else if (sockfd >= 0) {
-        ret = setup_client(rtmps, socks, sockfd);
-        if (ret < 0) continue;
-        nb_socks++;
-        smax = sockfd > smax ? sockfd : smax;
-    }
+        if (sockfd <= 0 && EAGAIN != errno) {
+            fprintf(stderr, "%s: accept failed", __FUNCTION__);
+        } else if (sockfd >= 0) {
+            ret = setup_client(rtmps, socks, sockfd);
+            if (ret < 0) continue;
+            nb_socks++;
+            smax = sockfd > smax ? sockfd : smax;
+        }
     }
 
     // check clients
