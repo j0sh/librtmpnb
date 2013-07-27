@@ -13,6 +13,7 @@ static int setup_listen(int port)
 {
     struct sockaddr_in addr;
     int sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), tmp = 1;
+    int sockflags;
     char *iface = "0.0.0.0";
 
     if (-1 == sockfd) {
@@ -24,6 +25,8 @@ static int setup_listen(int port)
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = inet_addr(iface);
     addr.sin_port = htons(port);
+    sockflags = fcntl(sockfd, F_GETFL, 0);
+    fcntl(sockfd, F_SETFL, sockflags | O_NONBLOCK);
 
     if (bind(sockfd, (struct sockaddr *)&addr, sizeof(addr))) {
         fprintf(stderr, "%s, TCP bind failed for port number: %d\n",
@@ -245,88 +248,124 @@ static void handle_packet(RTMP *r, RTMPPacket *pkt)
     }
 }
 
-static int serve(RTMP *r)
+#define MAXC 100
+static int setup_client(RTMP *rtmps, int *socks, int fd)
 {
-    int ret = 0;
-    RTMPPacket pkt;
-    fd_set rset;
-    fd_set wset;
+    RTMP *r;
+    struct sockaddr_in dest;
+    int i, sockflags = fcntl(fd, F_GETFL, 0);
+    socklen_t destlen = sizeof(struct sockaddr_in);
+    getsockopt(fd, SOL_IP, SO_ORIGINAL_DST, &dest, &destlen);
 
-    memset(&pkt, 0, sizeof(RTMPPacket));
-
-    while (1) {
-        struct timeval t = {1, 0};
-        FD_SET(r->m_sb.sb_socket, &rset);
-        FD_SET(r->m_sb.sb_socket, &wset);
-        int ret = select(r->m_sb.sb_socket + 1, &rset, NULL, NULL, &t);
-        if (-1 == ret) {
-            fprintf(stderr, "Error in select\n");
-            goto serve_error;
-        }
-        if (!FD_ISSET(r->m_sb.sb_socket, &rset)) continue;
-        if (!RTMP_IsConnected(r)) goto serve_cleanup;
-        ret = RTMPSockBuf_Fill(&r->m_sb);
-        if (RTMP_NB_ERROR == ret || r->m_sb.sb_size <= 0) goto serve_error;
-srv_loop:
-        ret = RTMP_ServeNB(r, &pkt);
-        switch(ret) {
-        case RTMP_NB_ERROR: goto serve_error;
-        case RTMP_NB_EAGAIN: continue;
-        case RTMP_NB_OK:
-            handle_packet(r, &pkt);
-            RTMPPacket_Free(&pkt);
-        default:
-            if (r->m_sb.sb_size > 0) goto srv_loop;
-        }
+    for (i = 0; i < MAXC; i++) {
+        if (socks[i] == -1) break;
+    }
+    if (MAXC == i) {
+        RTMP_Log(RTMP_LOGERROR, "No more client slots; increase?\n");
+        return -1;
     }
 
-serve_cleanup:
-    RTMPPacket_Free(&pkt);
+    fcntl(fd, F_SETFL, sockflags | O_NONBLOCK);
+    socks[i] = fd;
+    r = &rtmps[i];
+    RTMP_Init(r);
+    r->m_sb.sb_socket = fd;
+
+    printf("%s accepted connection from %s at index %d\n",
+           __FUNCTION__, inet_ntoa(dest.sin_addr), i);
+
     return 0;
-serve_error:
-    fprintf(stderr, "Server Error\n");
-    RTMPPacket_Free(&pkt);
-    return -1;
+}
+
+static int cleanup_client(RTMP *rtmps, int *socks, int i)
+{
+    int smax = -1;
+    printf("closing connection at index %d\n", i);
+    RTMP_Close(&rtmps[i]);
+    close(socks[i]);
+    socks[i] = -1;
+    for (i = 0; i < MAXC; i++) {
+        if (socks[i] > smax) smax = socks[i];
+    }
+    return smax;
+}
+
+static int serve_client(RTMP *r)
+{
+    RTMPPacket pkt;
+    int ret = RTMPSockBuf_Fill(&r->m_sb);
+    if (RTMP_NB_ERROR == ret || r->m_sb.sb_size <= 0)
+        return RTMP_NB_ERROR;
+    memset(&pkt, 0, sizeof(RTMPPacket));
+srv_loop:
+    ret = RTMP_ServeNB(r, &pkt);
+    switch(ret) {
+    case RTMP_NB_ERROR:
+    case RTMP_NB_EAGAIN:
+        return ret;
+    case RTMP_NB_OK:
+       handle_packet(r, &pkt);
+       RTMPPacket_Free(&pkt);
+    default:
+        if (r->m_sb.sb_size > 0) goto srv_loop;
+    }
+    return 1;
 }
 
 int main()
 {
-    RTMP rtmp;
-    memset(&rtmp, 0, sizeof(RTMP));
+    RTMP rtmps[MAXC];
+    memset(rtmps, 0, sizeof(rtmps));
     int listenfd = setup_listen(1935);
+    int socks[MAXC], nb_socks = 0, i, smax = listenfd;
+    fd_set rset;
 
     if (listenfd < 0) return 0;
+    memset(socks, -1, sizeof(socks));
+    socks[nb_socks++] = listenfd;
 
+    RTMP_LogSetLevel(RTMP_LOGDEBUG);
+while (1) {
+    struct timeval t = {1, 0};
     struct sockaddr_in addr;
     socklen_t addrlen = sizeof(struct sockaddr_in);
-    int sockfd =
-        accept(listenfd, (struct sockaddr *) &addr, &addrlen);
+    int ret, sockfd, old_nb;
 
-    if (sockfd <= 0) {
+    for (i = 0; i < nb_socks; i++)
+        if (-1 != socks[i]) FD_SET(socks[i], &rset);
+    ret = select(smax + 1, &rset, NULL, NULL, &t);
+    if (-1 == ret) goto cleanup;
+
+    // check acceptor
+    if (!FD_ISSET(listenfd, &rset)) goto check_clients;
+    sockfd = accept(listenfd, (struct sockaddr *) &addr, &addrlen);
+    if (sockfd <= 0 && EAGAIN != errno) {
         fprintf(stderr, "%s: accept failed", __FUNCTION__);
+    } else if (sockfd >= 0) {
+        ret = setup_client(rtmps, socks, sockfd);
+        if (ret < 0) continue;
+        nb_socks++;
+        smax = sockfd > smax ? sockfd : smax;
     }
 
-    struct sockaddr_in dest;
-    char destch[16];
-    int sockflags;
-    socklen_t destlen = sizeof(struct sockaddr_in);
-    getsockopt(sockfd, SOL_IP, SO_ORIGINAL_DST, &dest, &destlen);
-    strcpy(destch, inet_ntoa(dest.sin_addr));
-    printf("%s: accepted connection from %s to %s\n", __FUNCTION__,
-           inet_ntoa(addr.sin_addr), destch);
-    sockflags = fcntl(sockfd, F_GETFL, 0);
-    fcntl(sockfd, F_SETFL, sockflags | O_NONBLOCK);
-
-    RTMP_LogSetLevel(RTMP_LOGERROR);
-    RTMP_Init(&rtmp);
-    rtmp.m_sb.sb_socket = sockfd;
-
-    if (serve(&rtmp) < 0) goto cleanup;
+check_clients:
+    old_nb = nb_socks;
+    for (i = 1; i < old_nb; i++) { // 1 is the acceptor; skip
+        RTMP *r = &rtmps[i];
+        if (-1 == socks[i] ||!FD_ISSET(socks[i], &rset)) continue;
+        if (RTMP_NB_ERROR != serve_client(r)) continue;
+        smax = cleanup_client(rtmps, socks, i);
+        nb_socks--;
+    }
+}
 
     printf("Hello, World!\n");
     return 0;
 cleanup:
-    RTMP_Close(&rtmp);
+    for (i = 0; i < MAXC; i++) {
+        RTMP_Close(&rtmps[i]);
+        if (-1 != socks[i]) close(socks[i]);
+    }
     printf("goodbye, sad world\n");
     return 0;
 }
