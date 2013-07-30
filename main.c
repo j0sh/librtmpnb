@@ -331,9 +331,10 @@ while (1) {
     struct timeval t = {1, 0};
     struct sockaddr_in addr;
     socklen_t addrlen = sizeof(struct sockaddr_in);
-    int ret, sockfd, old_nb;
+    int ret, sockfd;
 
-    for (i = 0; i < nb_socks; i++)
+    FD_ZERO(&rset);
+    for (i = 0; i < MAXC; i++)
         if (-1 != socks[i]) FD_SET(socks[i], &rset);
     ret = select(smax + 1, &rset, NULL, NULL, &t);
     if (-1 == ret) goto cleanup;
@@ -354,8 +355,7 @@ while (1) {
     }
 
     // check clients
-    old_nb = nb_socks;
-    for (i = nb_listeners; i < old_nb; i++) {
+    for (i = nb_listeners; i < MAXC; i++) {
         RTMP *r = &rtmps[i];
         if (-1 == socks[i] ||!FD_ISSET(socks[i], &rset)) continue;
         if (RTMP_NB_ERROR != serve_client(r)) continue;
