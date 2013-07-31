@@ -3748,6 +3748,13 @@ RTMP_ReadPacket(RTMP *r, RTMPPacket *packet)
             packet->m_nBytesRead = 0;
             RTMPPacket_Free(packet);
 
+            if (packet->m_nBodySize > RTMP_MAX_ELEM_SIZE ||
+                packet->m_nBodySize < 0) {
+                RTMP_Log(RTMP_LOGWARNING, "%s Bad packet size %d",
+                         __FUNCTION__, packet->m_nBodySize);
+                return RTMP_NB_ERROR;
+            }
+
             if (nSize > 6) {
                 packet->m_packetType = header[6];
 

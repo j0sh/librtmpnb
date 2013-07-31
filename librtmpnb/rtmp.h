@@ -62,6 +62,7 @@ extern "C"
 
     /* needs to fit largest number of bytes recv() may return */
 #define RTMP_BUFFER_CACHE_SIZE (16*1024)
+#define RTMP_MAX_ELEM_SIZE RTMP_BUFFER_CACHE_SIZE * 100
 
 #define	RTMP_CHANNELS	65600
 
