@@ -47,12 +47,12 @@ extern "C"
 #define RTMP_FEATURE_SSL	0x04
 #define RTMP_FEATURE_MFP	0x08	/* not yet supported */
 #define RTMP_FEATURE_WRITE	0x10	/* publish, not play */
-#define RTMP_FEATURE_HTTP2	0x20	/* server-side rtmpt */
+#define RTMP_FEATURE_SHTTP	0x20	/* server-side rtmpt */
 
 #define RTMP_PROTOCOL_UNDEFINED	-1
 #define RTMP_PROTOCOL_RTMP      0
 #define RTMP_PROTOCOL_RTMPE     RTMP_FEATURE_ENC
-#define RTMP_PROTOCOL_RTMPT     RTMP_FEATURE_HTTP
+#define RTMP_PROTOCOL_RTMPT     (RTMP_FEATURE_HTTP|RTMP_FEATURE_SHTTP)
 #define RTMP_PROTOCOL_RTMPS     RTMP_FEATURE_SSL
 #define RTMP_PROTOCOL_RTMPTE    (RTMP_FEATURE_HTTP|RTMP_FEATURE_ENC)
 #define RTMP_PROTOCOL_RTMPTS    (RTMP_FEATURE_HTTP|RTMP_FEATURE_SSL)
@@ -383,6 +383,8 @@ extern "C"
     void RTMP_DropRequest(RTMP *r, int i, int freeit);
     int RTMP_Read(RTMP *r, char *buf, int size);
     int RTMP_Write(RTMP *r, const char *buf, int size);
+
+    int HTTP_SRead(RTMP *r, AVal *clientid);
 
     /* hashswf.c */
     int RTMP_HashSWF(const char *url, unsigned int *size, unsigned char *hash,

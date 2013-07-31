@@ -1370,6 +1370,182 @@ extern FILE *netstackdump;
 extern FILE *netstackdump_read;
 #endif
 
+int HTTP_respond(RTMP  *r, const char *content, int cl, uint8_t prefix)
+{
+    char hbuf[512];
+    int hlen = snprintf(hbuf, sizeof(hbuf),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Length: %d\r\n\r\n",
+        cl + !!prefix);
+    if (prefix) hbuf[hlen++] = prefix;
+    hlen = RTMPSockBuf_Send(&r->m_sb, hbuf, hlen);
+    return hlen + RTMPSockBuf_Send(&r->m_sb, content, cl);
+}
+
+#define HTTPIDSZ 2
+#define HTTPIDSTRSZ (HTTPIDSZ * sizeof (int) * 2)
+void HTTP_open(RTMP *r)
+{
+    int i, len = HTTPIDSTRSZ + 1;
+    char *cid = malloc(HTTPIDSTRSZ + 2), *c = cid;
+    //srand(time(NULL));
+    memset(cid, 0, HTTPIDSTRSZ+2);
+    if (!cid) {
+        RTMP_Log(RTMP_LOGERROR, "%s Unable to malloc ID!",
+                 __FUNCTION__);
+        exit(1);
+    }
+    for (i = 0; i < HTTPIDSZ; i++) {
+        int ret = snprintf(c, len, "%08x", rand()); // rand() unsafe
+        c += ret;
+        len -= ret;
+    }
+    len -= 1;       // snprintf retval doesnt include the null byte
+    if (len) RTMP_Log(RTMP_LOGWARNING, "%s Nonzero length written!",
+                      __FUNCTION__);
+    RTMP_Log(RTMP_LOGINFO, "%s Client with ID %s created",
+             __FUNCTION__, cid);
+    cid[HTTPIDSTRSZ + 0] = '\n'; // flash expects a newline ?!?
+    cid[HTTPIDSTRSZ + 1] = '\0';
+    r->m_clientID.av_val = cid;
+    r->m_clientID.av_len = len + 1;
+    HTTP_respond(r, cid, HTTPIDSTRSZ + 1, 0);
+}
+
+static int HTTP_clientid(char **q, int *size, AVal *clientid)
+{
+    char *p = *q;
+    int sz = *size;
+
+    if (sz <= HTTPIDSTRSZ + 2) return RTMP_NB_EAGAIN;
+    if ('/' == *p) { // 'close' might have this
+        p++;
+        sz--;
+    }
+    if ('/' != p[HTTPIDSTRSZ]) {
+        RTMP_Log(RTMP_LOGWARNING, "%s ID malformed",
+                 __FUNCTION__);
+        return RTMP_NB_ERROR;
+    }
+    clientid->av_len = HTTPIDSTRSZ;
+    clientid->av_val = p;
+    *q = p + HTTPIDSTRSZ;
+    *size = sz - HTTPIDSTRSZ;
+    return RTMP_NB_OK;
+}
+
+#define HTTPPOST 0x54534f50
+#define HTTPFCS  0x2f736366
+#define HTTPOPEN 0x6e65706f
+#define HTTPSEND 0x646e6573
+#define HTTPIDLE 0x656c6469
+#define HTTPCLOS 0x736f6c63
+
+int HTTP_SRead(RTMP *r, AVal *cid)
+{
+    RTMPSockBufView v;
+    int sz, method, cl, skipbody = 1;
+    char *p, *q, last;
+
+    RTMPSockBuf_SetView(&r->m_sb, &v);
+    sz = v.sb_size;
+    p = v.sb_start;
+    last = v.sb_start[v.sb_size];
+    v.sb_start[v.sb_size] = '\0';
+
+    cid->av_len = 0;
+    cid->av_val = NULL;
+
+    if (sz < 6) goto reset_eagain;
+    if (HTTPPOST != *((uint32_t*)p)) goto verb_unknown;
+    sz -= 6; // "POST /" is six characters; skip them all
+    p += 6;
+
+#define GETCLIENTID \
+    switch (HTTP_clientid(&p, &sz, cid)) { \
+    case RTMP_NB_ERROR: return RTMP_NB_ERROR; \
+    case RTMP_NB_EAGAIN: goto reset_eagain; }\
+
+    // "close" is our longest method at 5 words
+    if (sz < 5) goto reset_eagain;
+    method = *((uint32_t*)p);
+    p += 5;
+    sz -= 5;
+    switch(method) {
+    case HTTPFCS:
+        RTMP_Log(RTMP_LOGINFO, "%s Got fcs", __FUNCTION__);
+        HTTP_respond(r, "127.0.0.1\n", strlen("127.0.0.1\n"), 0);
+        break;
+    case HTTPOPEN:
+        RTMP_Log(RTMP_LOGINFO, "%s Got open", __FUNCTION__);
+        HTTP_open(r);
+        break;
+    case HTTPIDLE:
+        RTMP_Log(RTMP_LOGINFO, "%s Got idle", __FUNCTION__);
+        GETCLIENTID
+        HTTP_respond(r, "\001", 1, 0);
+        break;
+    case HTTPCLOS:
+        if ('e' != p[-1]) goto method_unknown;
+        GETCLIENTID
+        RTMP_Log(RTMP_LOGINFO, "%s Got close", __FUNCTION__);
+        HTTP_respond(r, "\000", 1, 0);
+        break;
+    case HTTPSEND:
+        RTMP_Log(RTMP_LOGINFO, "%s Got send", __FUNCTION__);
+        GETCLIENTID
+        skipbody = 0;
+        break;
+    default:
+method_unknown:
+        RTMP_Log(RTMP_LOGWARNING, "%s Unknown method 0x%x",
+                 __FUNCTION__, method);
+        return RTMP_NB_ERROR;
+    }
+    q = strstr(p, "Content-Length: ");
+    if (!q) {
+        p = strstr(p, "\r\n\r\n");
+        if (!p && sz < 1024) goto reset_eagain;
+        RTMP_Log(RTMP_LOGWARNING, "%s Missing content-length",
+                 __FUNCTION__);
+        return RTMP_NB_ERROR;
+    }
+    p = q;
+    // also subtract 16; strlen("Content-Length: ")
+    sz = v.sb_size - (p - v.sb_start) - 16;
+    if (sz <= 0) return RTMP_NB_EAGAIN;
+    p += 16;
+    cl = atoi(p);
+    // now find end of header
+    p = strstr(p, "\r\n\r\n");
+    if (!p) {
+        if (sz < 1024) goto reset_eagain;
+        RTMP_Log(RTMP_LOGWARNING, "%s Header too large; %d bytes",
+                     __FUNCTION__, sz);
+        return RTMP_NB_ERROR;
+    }
+    sz = v.sb_size - (p - v.sb_start) - 4;
+    p += 4;
+    if (skipbody) {
+        if (cl > sz) goto reset_eagain;
+        p += cl;
+        sz -= cl;
+        cl = 0;
+    }
+    v.sb_read += v.sb_size - sz;
+    v.sb_start = p;
+    v.sb_size = sz;
+    v.sb_start[v.sb_size] = last;
+    RTMPSockBuf_Flush(r, &v);
+    return RTMP_NB_OK;
+verb_unknown:
+    RTMP_Log(RTMP_LOGWARNING, "Invalid verb; request:\n%s", p);
+    return RTMP_NB_ERROR;
+reset_eagain:
+    v.sb_start[v.sb_size] = last;
+    return RTMP_NB_EAGAIN;
+}
+
 static int
 ReadN2(RTMP *r, RTMPSockBufView *v, char *buffer, int n)
 {
@@ -4028,7 +4204,8 @@ RTMP_Close(RTMP *r)
             SendDeleteStream(r, i);
         }
         if (r->m_clientID.av_val) {
-            HTTP_Post(r, RTMPT_CLOSE, "", 1);
+            if (r->Link.protocol & RTMP_FEATURE_HTTP)
+                HTTP_Post(r, RTMPT_CLOSE, "", 1);
             free(r->m_clientID.av_val);
             r->m_clientID.av_val = NULL;
             r->m_clientID.av_len = 0;
