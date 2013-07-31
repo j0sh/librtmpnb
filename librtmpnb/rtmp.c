@@ -1546,6 +1546,56 @@ reset_eagain:
     return RTMP_NB_EAGAIN;
 }
 
+static int HTTP_read2(RTMP *r, RTMPSockBufView *v)
+{
+    char *ptr;
+    int hlen;
+
+    if (v->sb_size < 13) return RTMP_NB_EAGAIN;
+    if (strncmp(v->sb_start, "HTTP/1.1 200 ", 13))
+        return RTMP_NB_ERROR;
+    v->sb_start[v->sb_size] = '\0';
+    if (!strstr(v->sb_start, "\r\n\r\n")) return RTMP_NB_EAGAIN;
+
+    ptr = v->sb_start + sizeof("HTTP/1.1 200");
+    while ((ptr = strstr(ptr, "Content-"))) {
+        if (!strncasecmp(ptr+8, "length:", 7)) break;
+        ptr += 8;
+    }
+    if (!ptr) return RTMP_NB_ERROR;
+    hlen = atoi(ptr+16);
+    ptr = strstr(ptr+16, "\r\n\r\n");
+    if (!ptr) return RTMP_NB_ERROR;
+    ptr += 4;
+    if (hlen > RTMP_MAX_ELEM_SIZE || hlen < 0) {
+        RTMP_Log(RTMP_LOGWARNING, "%s invalid body size: %d",
+                 __FUNCTION__, hlen);
+        return RTMP_NB_ERROR;
+    }
+    if (ptr + (r->m_clientID.av_val ? 1 : hlen) >
+        v->sb_start + v->sb_size) return RTMP_NB_EAGAIN;
+
+    v->sb_size -= ptr - v->sb_start;
+    v->sb_start = ptr;
+    r->m_unackd--;
+
+    if (!r->m_clientID.av_val) {
+        r->m_clientID.av_len = hlen;
+        r->m_clientID.av_val = malloc(hlen+1);
+        if (!r->m_clientID.av_val) return RTMP_NB_ERROR;
+        r->m_clientID.av_val[0] = '/';
+        memcpy(r->m_clientID.av_val+1, ptr, hlen-1);
+        r->m_clientID.av_val[hlen] = 0;
+        v->sb_size = 0;
+    } else {
+        r->m_polling = *ptr++;
+        r->m_resplen = hlen - 1;
+        v->sb_start++;
+        v->sb_size--;
+    }
+    return RTMP_NB_OK;
+}
+
 static int
 ReadN2(RTMP *r, RTMPSockBufView *v, char *buffer, int n)
 {
