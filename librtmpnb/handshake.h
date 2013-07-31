@@ -1082,7 +1082,8 @@ static int SHandShake1(RTMP *r) {
     int encrypted;
     int32_t *ip;
 
-    uint8_t clientsig[RTMP_SIG_SIZE];
+    uint8_t writebuf[2 * RTMP_SIG_SIZE + 1];
+    uint8_t *clientsig = writebuf + RTMP_SIG_SIZE + 1;
     uint8_t *serverbuf = r->m_HSContext.serverbuf;
     uint8_t *serversig = serverbuf + 4;
     uint8_t type;
@@ -1198,8 +1199,7 @@ static int SHandShake1(RTMP *r) {
     RTMP_Log(RTMP_LOGDEBUG2, "Serversig: ");
     RTMP_LogHex(RTMP_LOGDEBUG2, serversig, RTMP_SIG_SIZE);
 
-    if (!WriteN(r, (char *)serversig-1, RTMP_SIG_SIZE + 1))
-        return RTMP_NB_ERROR;
+    memcpy(writebuf, serversig-1, RTMP_SIG_SIZE + 1);
 
     /* decode client response */
     memcpy(&uptime, clientsig, 4);
@@ -1318,7 +1318,7 @@ static int SHandShake1(RTMP *r) {
              __FUNCTION__);
     RTMP_LogHex(RTMP_LOGDEBUG2, clientsig, RTMP_SIG_SIZE);
 
-    if (!WriteN(r, (char *)clientsig, RTMP_SIG_SIZE))
+    if (!WriteN(r, (char *)writebuf, 2 * RTMP_SIG_SIZE + 1))
         return RTMP_NB_ERROR;
 
     r->m_HSContext.state = HANDSHAKE_2;
