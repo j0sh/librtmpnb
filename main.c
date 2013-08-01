@@ -376,15 +376,47 @@ static int handle_invoke(RTMP *r, RTMPPacket *pkt)
     return ret;
 }
 
+static int handle_notify(RTMP *r, RTMPPacket *pkt)
+{
+    return RTMP_NB_OK;
+}
+
+static int handle_control(RTMP *r, RTMPPacket *pkt)
+{
+    char *body = pkt->m_body;
+    int bsz = pkt->m_nBodySize, control_id;
+    if (bsz < 6) goto control_error; // includes 4-byte control id
+    control_id = AMF_DecodeInt16(body);
+    body += 2;
+    bsz -= 2;
+    switch (control_id) {
+    default:
+        RTMP_Log(RTMP_LOGWARNING, "%s Unhandled control %d",
+                 __FUNCTION__, control_id);
+    }
+    return RTMP_NB_OK;
+control_error:
+    RTMP_Log(RTMP_LOGWARNING, "%s Not enough bytes in control packet",
+             __FUNCTION__);
+    return RTMP_NB_ERROR;
+}
+
 static int handle_packet(RTMP *r, RTMPPacket *pkt)
 {
     switch (pkt->m_packetType) {
     case RTMP_PACKET_TYPE_FLEX_MESSAGE:
     case RTMP_PACKET_TYPE_INVOKE:
         return handle_invoke(r, pkt);
-        break;
+    case RTMP_PACKET_TYPE_INFO:
+        return handle_notify(r, pkt);
     case RTMP_PACKET_TYPE_AUDIO:
     case RTMP_PACKET_TYPE_VIDEO:
+        break;
+    case RTMP_PACKET_TYPE_CONTROL:
+        return handle_control(r, pkt);
+    case RTMP_PACKET_TYPE_SERVER_BW:
+        RTMP_Log(RTMP_LOGINFO, "%s Got server BW; not doing anything",
+                 __FUNCTION__);
         break;
     default:
         fprintf(stderr, "Got unhandled packet type %d\n",
