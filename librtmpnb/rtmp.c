@@ -4172,6 +4172,23 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
             toff = tbuf;
         }
     }
+
+    /* we invoked a remote method */
+    if (packet->m_packetType == RTMP_PACKET_TYPE_INVOKE) {
+        AVal method;
+        char *ptr;
+        ptr = packet->m_body + 1;
+        AMF_DecodeString(ptr, &method);
+        RTMP_Log(RTMP_LOGDEBUG, "Invoking %s", method.av_val);
+        /* keep it in call queue till result arrives */
+        if (queue) {
+            int txn;
+            ptr += 3 + method.av_len;
+            txn = (int)AMF_DecodeNumber(ptr);
+            AV_queue(&r->m_methodCalls, &r->m_numCalls, &method, txn);
+        }
+    }
+
     while (nSize + hSize) {
         int wrote;
 
@@ -4214,22 +4231,6 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
         tbuf = NULL;
         if (!wrote)
             return FALSE;
-    }
-
-    /* we invoked a remote method */
-    if (packet->m_packetType == RTMP_PACKET_TYPE_INVOKE) {
-        AVal method;
-        char *ptr;
-        ptr = packet->m_body + 1;
-        AMF_DecodeString(ptr, &method);
-        RTMP_Log(RTMP_LOGDEBUG, "Invoking %s", method.av_val);
-        /* keep it in call queue till result arrives */
-        if (queue) {
-            int txn;
-            ptr += 3 + method.av_len;
-            txn = (int)AMF_DecodeNumber(ptr);
-            AV_queue(&r->m_methodCalls, &r->m_numCalls, &method, txn);
-        }
     }
 
     if (!r->m_vecChannelsOut[packet->m_nChannel])
