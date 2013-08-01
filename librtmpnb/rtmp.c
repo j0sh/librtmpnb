@@ -1371,8 +1371,9 @@ extern FILE *netstackdump_read;
 #endif
 
 int HTTP_respond(RTMP  *r, const char *content, int cl, uint8_t prefix)
+#define RTMP_HTTP_HEADER_SIZE 512
 {
-    char hbuf[512];
+    char hbuf[RTMP_HTTP_HEADER_SIZE];
     int hlen = snprintf(hbuf, sizeof(hbuf),
         "HTTP/1.1 200 OK\r\n"
         "Content-Length: %d\r\n\r\n",
@@ -4518,7 +4519,7 @@ DecodeTEA(AVal *key, AVal *text)
 static int
 HTTP_Post(RTMP *r, RTMPTCmd cmd, const char *buf, int len)
 {
-    char hbuf[512];
+    char hbuf[RTMP_HTTP_HEADER_SIZE];
     int hlen = snprintf(hbuf, sizeof(hbuf), "POST /%s%s/%d HTTP/1.1\r\n"
                         "Host: %.*s:%d\r\n"
                         "Accept: */*\r\n"
