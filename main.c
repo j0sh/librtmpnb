@@ -193,10 +193,10 @@ static void process_cxn(RTMP *r, AMFObject *obj)
 }
 
 static int nb_streams = 0;
-static void handle_invoke(RTMP *r, RTMPPacket *pkt)
+static int handle_invoke(RTMP *r, RTMPPacket *pkt)
 {
     uint8_t *body = pkt->m_body;
-    int bsz = pkt->m_nBodySize;
+    int bsz = pkt->m_nBodySize, ret = RTMP_NB_OK;
     double txn;
     AMFObject obj;
     AVal method;
@@ -208,12 +208,12 @@ static void handle_invoke(RTMP *r, RTMPPacket *pkt)
     if (0x02 != *body) {
         RTMP_Log(RTMP_LOGWARNING, "%s Sanity failed; no string method"
                  " in invoke packet", __FUNCTION__);
-        return;
+        return RTMP_NB_ERROR;
     }
     if (AMF_Decode(&obj, body, bsz, FALSE) < 0) {
         RTMP_Log(RTMP_LOGERROR, "%s Error decoding invoke packet",
                  __FUNCTION__);
-        return;
+        return RTMP_NB_ERROR;
     }
     AMF_Dump(&obj);
     AMFProp_GetString(AMF_GetProp(&obj, NULL, 0), &method);
@@ -229,14 +229,15 @@ static void handle_invoke(RTMP *r, RTMPPacket *pkt)
     } else if (AVMATCH(&method, &av_publish)) {
     } else send_error(r, txn, "Unknown method");
     AMF_Reset(&obj);
+    return ret;
 }
 
-static void handle_packet(RTMP *r, RTMPPacket *pkt)
+static int handle_packet(RTMP *r, RTMPPacket *pkt)
 {
     switch (pkt->m_packetType) {
     case RTMP_PACKET_TYPE_FLEX_MESSAGE:
     case RTMP_PACKET_TYPE_INVOKE:
-        handle_invoke(r, pkt);
+        return handle_invoke(r, pkt);
         break;
     case RTMP_PACKET_TYPE_AUDIO:
     case RTMP_PACKET_TYPE_VIDEO:
@@ -244,7 +245,9 @@ static void handle_packet(RTMP *r, RTMPPacket *pkt)
     default:
         fprintf(stderr, "Got unhandled packet type %d\n",
                 pkt->m_packetType);
+        return RTMP_NB_ERROR;
     }
+    return RTMP_NB_OK;
 }
 
 #define MAXC 100
@@ -303,8 +306,9 @@ srv_loop:
     case RTMP_NB_EAGAIN:
         return ret;
     case RTMP_NB_OK:
-       handle_packet(r, &pkt);
+       ret = handle_packet(r, &pkt);
        RTMPPacket_Free(&pkt);
+        if (RTMP_NB_ERROR == ret) return ret;
     default:
         if (r->m_sb.sb_size > 0) goto srv_loop;
     }
