@@ -4438,6 +4438,18 @@ RTMPSockBuf_Fill(RTMPSockBuf *sb)
 
     while (1) {
         nBytes = sizeof(sb->sb_buf) - 1 - sb->sb_size - (sb->sb_start - sb->sb_buf);
+        if (!nBytes) {
+            // time to reset the buffer
+            if (sb->sb_buf + sb->sb_size > sb->sb_start) {
+                // overlaps; hopefully only for VERY BIG chunks
+                // TODO limit chunk size to RTMP_BUFFER_CACHE_SIZE ?
+                RTMP_Log(RTMP_LOGWARNING, "%s Overlapping buffer!",
+                         __FUNCTION__);
+                memmove(sb->sb_buf, sb->sb_start, sb->sb_size);
+            } else memcpy(sb->sb_buf, sb->sb_start, sb->sb_size);
+            sb->sb_start = sb->sb_buf;
+            continue;
+        }
 #if defined(CRYPTO) && !defined(NO_SSL)
         if (sb->sb_ssl) {
             nBytes = TLS_read(sb->sb_ssl, sb->sb_start + sb->sb_size, nBytes);
