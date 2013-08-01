@@ -116,6 +116,7 @@ typedef struct RTMPSockBufView {
 } RTMPSockBufView;
 
 static int ReadN2(RTMP *r, RTMPSockBufView *v, char *buffer, int n);
+static int WriteN2(RTMP *r, const char *buffer, int n);
 static int RTMPSockBuf_Flush(RTMP *r, RTMPSockBufView *v);
 static void RTMPSockBuf_SetView(RTMPSockBuf *sb, RTMPSockBufView *v);
 
@@ -351,6 +352,8 @@ RTMP_Init(RTMP *r)
     r->Link.timeout = 30;
     r->Link.swfAge = 30;
     r->m_HSContext.state = HANDSHAKE_1;
+    if (r->wb.wb_buf) free(r->wb.wb_buf);
+    r->wb.wb_buf =  NULL;
 }
 
 void
@@ -1370,8 +1373,9 @@ extern FILE *netstackdump;
 extern FILE *netstackdump_read;
 #endif
 
-int HTTP_respond(RTMP  *r, const char *content, int cl, uint8_t prefix)
 #define RTMP_HTTP_HEADER_SIZE 512
+static int HTTP_ResponseHeader(RTMP* r, char *c, int cl,
+    int prefix)
 {
     char hbuf[RTMP_HTTP_HEADER_SIZE];
     int hlen = snprintf(hbuf, sizeof(hbuf),
@@ -1379,8 +1383,18 @@ int HTTP_respond(RTMP  *r, const char *content, int cl, uint8_t prefix)
         "Content-Length: %d\r\n\r\n",
         cl + !!prefix);
     if (prefix) hbuf[hlen++] = prefix;
-    hlen = RTMPSockBuf_Send(&r->m_sb, hbuf, hlen);
-    return hlen + RTMPSockBuf_Send(&r->m_sb, content, cl);
+    // assume RTMP_PacketBody has already inserted padding
+    memcpy(c - hlen, hbuf, hlen);
+    return hlen;
+}
+
+int HTTP_respond(RTMP  *r, const char *content, int cl, uint8_t prefix)
+{
+    char *c = RTMP_PacketBody(r, cl);
+    int hlen = HTTP_ResponseHeader(r, c, cl, prefix);
+    if (!c) return RTMP_NB_ERROR;
+    memcpy(c, content, cl);
+    return RTMPSockBuf_Send(&r->m_sb, c, cl+hlen);
 }
 
 #define HTTPIDSZ 2
@@ -1741,6 +1755,39 @@ ReadN(RTMP *r, char *buffer, int n)
     }
 
     return nOriginalSize - n;
+}
+
+static int WriteN2(RTMP *r, const char *buffer, int n)
+{
+    int nBytes = n;
+    char *c = (char*)buffer;
+#ifdef CRYPTO
+    if (r->Link.rc4keyOut) {
+        RC4_encrypt(r->Link.rc4keyOut, n, c);
+    }
+#endif
+
+    if (r->Link.protocol & RTMP_FEATURE_SHTTP) {
+        nBytes = n + HTTP_ResponseHeader(r, c, n, 1);
+        c -= nBytes - n;
+    } else if (r->Link.protocol & RTMP_FEATURE_HTTP) {
+        RTMP_Log(RTMP_LOGERROR, "%s RTMPT client unsupported",
+                 __FUNCTION__);
+        // nBytes = HTTP_Post(r, RTMPT_SEND, buffer, n);
+        return RTMP_NB_ERROR;
+    }
+
+    if (r->wq[r->wq_wpos].wq_sz) {
+        RTMP_Log(RTMP_LOGWARNING, "%s Write buffer nonempty! "
+                 "Consider enlarging buffer?", __FUNCTION__);
+        return RTMP_NB_OK; // just drop the packet, i guess
+    }
+    r->wq[r->wq_wpos].wq_sz = nBytes;
+    r->wq[r->wq_wpos].wq_buf = c;
+    r->wq_wpos = (r->wq_wpos + 1) & (WQSZ-1);
+    r->wq_ready++;
+
+    return nBytes;
 }
 
 static int
@@ -2313,7 +2360,7 @@ static int
 SendBytesReceived(RTMP *r)
 {
     RTMPPacket packet;
-    char pbuf[256], *pend = pbuf + sizeof(pbuf);
+    char *pbuf = RTMP_PacketBody(r, 256), *pend = pbuf + 256;
 
     packet.m_nChannel = 0x02;	/* control channel (invoke) */
     packet.m_headerType = RTMP_PACKET_SIZE_MEDIUM;
@@ -2321,7 +2368,7 @@ SendBytesReceived(RTMP *r)
     packet.m_nTimeStamp = 0;
     packet.m_nInfoField2 = 0;
     packet.m_hasAbsTimestamp = 0;
-    packet.m_body = pbuf + RTMP_MAX_HEADER_SIZE;
+    packet.m_body = pbuf;
 
     packet.m_nBodySize = 4;
 
@@ -4202,7 +4249,7 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
             memcpy(toff, header, nChunkSize + hSize);
             toff += nChunkSize + hSize;
         } else {
-            wrote = WriteN(r, header, nChunkSize + hSize);
+            wrote = WriteN2(r, header, nChunkSize + hSize);
             if (!wrote)
                 return FALSE;
         }
@@ -4227,7 +4274,7 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
         }
     }
     if (tbuf) {
-        int wrote = WriteN(r, tbuf, toff-tbuf);
+        int wrote = WriteN2(r, tbuf, toff-tbuf);
         free(tbuf);
         tbuf = NULL;
         if (!wrote)
@@ -4375,6 +4422,10 @@ RTMP_Close(RTMP *r)
     free(r->Link.playpath0.av_val);
     r->Link.playpath0.av_val = NULL;
 #endif
+    if (r->wb.wb_buf) free(r->wb.wb_buf);
+    r->wb.wb_written = r->wb.wb_used = r->wb.wb_sz = 0;
+    r->wb.wb_buf = NULL;
+    memset(&r->wq, 0, sizeof(r->wq));
 }
 
 int
@@ -5216,4 +5267,70 @@ RTMP_Write(RTMP *r, const char *buf, int size)
         }
     }
     return size+s2;
+}
+
+char* RTMP_PacketBody(RTMP *r, int size)
+{
+    int hsz = RTMP_MAX_HEADER_SIZE, realsz;
+    char *body = r->wb.wb_buf + r->wb.wb_used;
+    if (r->Link.protocol & RTMP_PROTOCOL_RTMP)
+        hsz += RTMP_HTTP_HEADER_SIZE;
+    realsz = size + hsz;
+    if (r->wb.wb_written == r->wb.wb_used) {
+        r->wb.wb_written = r->wb.wb_used = 0;
+    }
+
+    if (r->wb.wb_used + realsz <= r->wb.wb_sz) goto pb_finish;
+
+    // enlarge write buffer
+    r->wb.wb_sz += realsz > RTMP_BUFFER_CACHE_SIZE ?
+        realsz : RTMP_BUFFER_CACHE_SIZE;
+    if (r->wb.wb_sz > RTMP_MAX_ELEM_SIZE || r->wb.wb_sz < 0) {
+        RTMP_Log(RTMP_LOGWARNING, "%s Packet size %d invalid",
+                 __FUNCTION__, r->wb.wb_sz);
+        return NULL;
+    }
+    r->wb.wb_buf = realloc(r->wb.wb_buf, r->wb.wb_sz);
+    if (!r->wb.wb_buf) {
+        RTMP_Log(RTMP_LOGERROR, "Unable to realloc packet body!");
+        exit(1);
+    }
+    body = r->wb.wb_buf + r->wb.wb_used;
+
+pb_finish:
+    r->wb.wb_used += realsz;
+    return body + hsz;
+}
+
+int RTMP_WriteQueued(RTMP *r)
+{
+    RTMPWriteQueue *wq;
+    int n, total = 0;
+
+tryagain:
+    if (!r->wq_ready) return total;
+    wq = &r->wq[r->wq_rpos];
+    n = RTMPSockBuf_Send(&r->m_sb, wq->wq_buf, wq->wq_sz);
+    if (n < 0) {
+        int sockerr = GetSockError();
+
+        if (sockerr == EINTR && !RTMP_ctrlC) goto tryagain;
+        if (EAGAIN == sockerr || EWOULDBLOCK == sockerr)
+            return RTMP_NB_EAGAIN;
+
+        RTMP_Log(RTMP_LOGERROR, "%s, RTMP send error %d (%d bytes)",
+                 __FUNCTION__, sockerr, n);
+        RTMP_Close(r); // hmm do this here?
+        return RTMP_NB_ERROR;
+    }
+    total += n;
+    r->wb.wb_written += n;
+    wq->wq_sz -= n;
+    wq->wq_buf += n;
+    if (!wq->wq_sz) {
+        r->wq_rpos = (r->wq_rpos + 1) & (WQSZ-1);
+        r->wq_ready--;
+        goto tryagain;
+    }
+    return total;
 }

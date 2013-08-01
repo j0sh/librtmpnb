@@ -1082,7 +1082,7 @@ static int SHandShake1(RTMP *r) {
     int encrypted;
     int32_t *ip;
 
-    uint8_t writebuf[2 * RTMP_SIG_SIZE + 1];
+    uint8_t *writebuf = (uint8_t*)RTMP_PacketBody(r, 2 * RTMP_SIG_SIZE + 1);
     uint8_t *clientsig = writebuf + RTMP_SIG_SIZE + 1;
     uint8_t *serverbuf = r->m_HSContext.serverbuf;
     uint8_t *serversig = serverbuf + 4;
@@ -1318,7 +1318,7 @@ static int SHandShake1(RTMP *r) {
              __FUNCTION__);
     RTMP_LogHex(RTMP_LOGDEBUG2, clientsig, RTMP_SIG_SIZE);
 
-    if (!WriteN(r, (char *)writebuf, 2 * RTMP_SIG_SIZE + 1))
+    if (!WriteN2(r, (char *)writebuf, 2 * RTMP_SIG_SIZE + 1))
         return RTMP_NB_ERROR;
 
     r->m_HSContext.state = HANDSHAKE_2;

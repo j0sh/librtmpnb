@@ -64,7 +64,7 @@ SAVC(objectEncoding);
 static int send_createstream_resp(RTMP *r, double txn, double ID)
 {
     RTMPPacket packet;
-    char pbuf[256], *pend = pbuf+sizeof(pbuf);
+    char *pbuf = RTMP_PacketBody(r, 256), *pend = pbuf + 256;
 
     packet.m_nChannel = 0x03;     // control channel (invoke)
     packet.m_headerType = 1; /* RTMP_PACKET_SIZE_MEDIUM; */
@@ -72,7 +72,7 @@ static int send_createstream_resp(RTMP *r, double txn, double ID)
     packet.m_nTimeStamp = 0;
     packet.m_nInfoField2 = 0;
     packet.m_hasAbsTimestamp = 0;
-    packet.m_body = pbuf + RTMP_MAX_HEADER_SIZE;
+    packet.m_body = pbuf;
 
     char *enc = packet.m_body;
     enc = AMF_EncodeString(enc, pend, &av__result);
@@ -87,8 +87,7 @@ static int send_createstream_resp(RTMP *r, double txn, double ID)
 
 static int send_error(RTMP *r, double txn, char *desc)
 {
-    char pbuf[384];
-    char *pend = pbuf + sizeof(pbuf), *enc;
+    char *pbuf = RTMP_PacketBody(r, 384), *pend = pbuf + 384, *enc;
     RTMPPacket packet;
     AVal av;
 
@@ -98,7 +97,7 @@ static int send_error(RTMP *r, double txn, char *desc)
     packet.m_nTimeStamp = 0;
     packet.m_nInfoField2 = 0;
     packet.m_hasAbsTimestamp = 0;
-    packet.m_body = pbuf + RTMP_MAX_HEADER_SIZE;
+    packet.m_body = pbuf;
 
     enc = packet.m_body;
     enc = AMF_EncodeString(enc, pend, &av__error);
@@ -122,7 +121,7 @@ static int send_error(RTMP *r, double txn, char *desc)
 static int send_cxn_resp(RTMP *r, double txn)
 {
   RTMPPacket packet;
-  char pbuf[384], *pend = pbuf+sizeof(pbuf);
+  char *pbuf = RTMP_PacketBody(r, 384), *pend = pbuf + 384, *enc;
   AMFObject obj;
   AMFObjectProperty p, op;
   AVal av;
@@ -133,9 +132,9 @@ static int send_cxn_resp(RTMP *r, double txn)
   packet.m_nTimeStamp = 0;
   packet.m_nInfoField2 = 0;
   packet.m_hasAbsTimestamp = 0;
-  packet.m_body = pbuf + RTMP_MAX_HEADER_SIZE;
+  packet.m_body = pbuf;
 
-  char *enc = packet.m_body;
+  enc = packet.m_body;
   enc = AMF_EncodeString(enc, pend, &av__result);
   enc = AMF_EncodeNumber(enc, pend, txn);
   *enc++ = AMF_OBJECT;
@@ -319,7 +318,7 @@ int main()
     int rtmpfd = setup_listen(1935);
     int httpfd = setup_listen(8080);
     int socks[MAXC], nb_socks = 0, i, smax = httpfd, nb_listeners = 2;
-    fd_set rset;
+    fd_set rset, wset;
 
     if (httpfd < 0 || rtmpfd < 0) return 0;
     memset(socks, -1, sizeof(socks));
@@ -334,9 +333,14 @@ while (1) {
     int ret, sockfd;
 
     FD_ZERO(&rset);
-    for (i = 0; i < MAXC; i++)
-        if (-1 != socks[i]) FD_SET(socks[i], &rset);
-    ret = select(smax + 1, &rset, NULL, NULL, &t);
+    FD_ZERO(&wset);
+    for (i = 0; i < MAXC; i++) {
+        if (-1 == socks[i]) continue;
+        FD_SET(socks[i], &rset);
+        if (i < nb_listeners) continue;
+        if (rtmps[i].wq_ready) FD_SET(socks[i], &wset);
+    }
+    ret = select(smax + 1, &rset, &wset, NULL, &t);
     if (-1 == ret) goto cleanup;
 
     // check listeners
@@ -359,6 +363,12 @@ while (1) {
         RTMP *r = &rtmps[i];
         if (-1 == socks[i] ||!FD_ISSET(socks[i], &rset)) continue;
         if (RTMP_NB_ERROR != serve_client(r)) continue;
+        smax = cleanup_client(rtmps, socks, i);
+        nb_socks--;
+    }
+    for (i = nb_listeners; i < MAXC; i++) {
+        if (-1 == socks[i] || !FD_ISSET(socks[i], &wset)) continue;
+        if (RTMP_NB_ERROR != RTMP_WriteQueued(&rtmps[i])) continue;
         smax = cleanup_client(rtmps, socks, i);
         nb_socks--;
     }

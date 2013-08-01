@@ -149,6 +149,18 @@ extern "C"
         void *sb_ssl;
     } RTMPSockBuf;
 
+    typedef struct RTMPWriteBuf {
+        int wb_sz;
+        int wb_written;
+        int wb_used;
+        char *wb_buf;
+    } RTMPWriteBuf;
+
+    typedef struct RTMPWriteQueue {
+        int wq_sz;
+        char *wq_buf;
+    } RTMPWriteQueue;
+
     void RTMPPacket_Reset(RTMPPacket *p);
     void RTMPPacket_Dump(RTMPPacket *p);
     int RTMPPacket_Alloc(RTMPPacket *p, int nSize);
@@ -291,6 +303,8 @@ extern "C"
         int m_unackd;
         int m_decrypted;
         uint8_t hbuf[RTMP_MAX_HEADER_SIZE];
+#define WQSZ 64
+        int wq_rpos, wq_wpos, wq_ready;
         AVal m_clientID;
 
         RTMP_READ m_read;
@@ -298,6 +312,8 @@ extern "C"
         RTMPSockBuf m_sb;
         RTMP_LNK Link;
         RTMP_HSContext m_HSContext;
+        RTMPWriteBuf wb;
+        RTMPWriteQueue wq[WQSZ];
     } RTMP;
 
     int RTMP_ParseURL(const char *url, int *protocol, AVal *host,
@@ -384,6 +400,8 @@ extern "C"
     void RTMP_DropRequest(RTMP *r, int i, int freeit);
     int RTMP_Read(RTMP *r, char *buf, int size);
     int RTMP_Write(RTMP *r, const char *buf, int size);
+    char* RTMP_PacketBody(RTMP *r, int size);
+    int RTMP_WriteQueued(RTMP *r);
 
     int HTTP_SRead(RTMP *r, AVal *clientid);
 
