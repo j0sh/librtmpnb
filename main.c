@@ -60,6 +60,9 @@ SAVC(level);
 SAVC(code);
 SAVC(description);
 SAVC(objectEncoding);
+SAVC(onStatus);
+SAVC(details);
+SAVC(clientid);
 
 static int send_createstream_resp(RTMP *r, double txn, double ID)
 {
@@ -116,6 +119,61 @@ static int send_error(RTMP *r, double txn, char *desc)
 
     packet.m_nBodySize = enc - packet.m_body;
     return RTMP_SendPacket(r, &packet, FALSE);
+}
+
+static int send_onstatus(RTMP *r, double txn, int streamid, int chan,
+    char *level, char *code, char *desc)
+{
+    char *pbuf = RTMP_PacketBody(r, 384), *pend = pbuf + 384, *enc;
+    RTMPPacket packet;
+    AVal av;
+
+    packet.m_nChannel = chan;
+    packet.m_headerType = 1; /* RTMP_PACKET_SIZE_MEDIUM; */
+    packet.m_packetType = RTMP_PACKET_TYPE_INVOKE;
+    packet.m_nTimeStamp = 0;
+    packet.m_nInfoField2 = streamid;
+    packet.m_hasAbsTimestamp = 0;
+    packet.m_body = pbuf;
+
+    enc = packet.m_body;
+    enc = AMF_EncodeString(enc, pend, &av_onStatus);
+    enc = AMF_EncodeNumber(enc, pend, txn);
+    *enc++ = AMF_NULL;
+    *enc++ = AMF_OBJECT;
+    STR2AVAL(av, level);
+    enc = AMF_EncodeNamedString(enc, pend, &av_level, &av);
+    STR2AVAL(av, code);
+    enc = AMF_EncodeNamedString(enc, pend, &av_code, &av);
+    STR2AVAL(av, desc);
+    enc = AMF_EncodeNamedString(enc, pend, &av_description, &av);
+    STR2AVAL(av, "none");
+    enc = AMF_EncodeNamedString(enc, pend, &av_details, &av);
+    enc = AMF_EncodeNamedString(enc, pend, &av_clientid, &av);
+    *enc++ = 0;
+    *enc++ = 0;
+    *enc++ = AMF_OBJECT_END;
+
+    packet.m_nBodySize = enc - packet.m_body;
+    return RTMP_SendPacket(r, &packet, FALSE);
+}
+
+static int send_publish_error(RTMP *r, AMFObject *obj, RTMPPacket *pkt,
+    char *desc)
+{
+    double txn = AMFProp_GetNumber(AMF_GetProp(obj, NULL, 1));
+    int sid = pkt->m_nInfoField2, chan = pkt->m_nChannel;
+    return send_onstatus(r, txn, sid, chan, "error",
+                         "NetStream.Publish.BadName", desc);
+}
+
+static int send_publish_start(RTMP *r, AMFObject *obj, RTMPPacket *pkt, char *sname)
+{
+    double txn = AMFProp_GetNumber(AMF_GetProp(obj, NULL, 1));
+    int sid = pkt->m_nInfoField2, chan = pkt->m_nChannel;
+    return send_onstatus(r, txn, sid, chan, "status",
+                         "NetStream.Publish.Start",
+                         "Stream is now published");
 }
 
 static int send_cxn_resp(RTMP *r, double txn)
