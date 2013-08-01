@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/fcntl.h>
 
@@ -8,6 +9,16 @@
 #ifdef linux
 #include <linux/netfilter_ipv4.h>
 #endif
+
+#define MAXC 100    /* max clients */
+#define MAXS MAXC   /* max streams */
+typedef struct stream {
+    AVal name;
+    int id;           // source id
+    RTMP *producer;
+    RTMP *consumers[MAXC];
+} Stream;
+static Stream streams[MAXS];
 
 static int setup_listen(int port)
 {
@@ -250,6 +261,78 @@ static void process_cxn(RTMP *r, AMFObject *obj)
     }
 }
 
+static void copy_aval(AVal *src, AVal *dst)
+{
+    dst->av_len = src->av_len;
+    dst->av_val = malloc(src->av_len + 1);
+    if (!dst->av_val) {
+        RTMP_Log(RTMP_LOGERROR, "Unable to malloc av_val!");
+        exit(1);
+    }
+    memcpy(dst->av_val, src->av_val, src->av_len);
+    dst->av_val[dst->av_len] = '\0';
+}
+
+static void free_aval(AVal *val)
+{
+    free(val->av_val);
+    val->av_val = NULL;
+    val->av_len = 0;
+}
+
+static int process_publish(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
+{
+    int i;
+    AVal name;
+    AMFProp_GetString(AMF_GetProp(obj, NULL, 3), &name);
+    if (!name.av_len) {
+        RTMP_Log(RTMP_LOGWARNING, "%s No stream name given",
+                 __FUNCTION__);
+        send_publish_error(r, obj, pkt, "No stream name given");
+        return RTMP_NB_ERROR;
+    }
+    for (i = 0; i < MAXS; i++) {
+        if (!streams[i].name.av_val) break;
+        if (!AVMATCH(&name, &streams[i].name)) continue;
+        RTMP_Log(RTMP_LOGERROR, "%s Stream already exists",
+                 __FUNCTION__);
+        send_publish_error(r, obj, pkt, "Stream already exists");
+        return RTMP_NB_ERROR;
+    }
+    if (i == MAXS) {
+        RTMP_Log(RTMP_LOGERROR, "%s Ran out of publishing slots",
+                 __FUNCTION__);
+        send_publish_error(r, obj, pkt,
+                           "No more publishing slots available");
+        return RTMP_NB_OK;
+    }
+    streams[i].producer = r;
+    streams[i].id = pkt->m_nInfoField2;
+    copy_aval(&name, &streams[i].name);
+    RTMP_Log(RTMP_LOGINFO, "%s Publishing %s",
+             __FUNCTION__, streams[i].name.av_val);
+    return send_publish_start(r, obj, pkt, streams[i].name.av_val);
+}
+
+static int process_close(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
+{
+    int i;
+    for (i = 0; i < MAXS; i++) {
+        if (streams[i].id == pkt->m_nInfoField2 &&
+            r == streams[i].producer) break;
+    }
+    if (i == MAXS) {
+        RTMP_Log(RTMP_LOGERROR, "%s Stream not found for id %d",
+                 __FUNCTION__, pkt->m_nInfoField2);
+        return RTMP_NB_ERROR;
+    }
+    RTMP_Log(RTMP_LOGINFO, "%s Closing %s",
+             __FUNCTION__, streams[i].name.av_val);
+    free_aval(&streams[i].name);
+    streams[i].producer = NULL;
+    return RTMP_NB_OK;
+}
+
 static int nb_streams = 0;
 static int handle_invoke(RTMP *r, RTMPPacket *pkt)
 {
@@ -285,6 +368,9 @@ static int handle_invoke(RTMP *r, RTMPPacket *pkt)
     } else if (AVMATCH(&method, &av_createStream)) {
         send_createstream_resp(r, txn, ++nb_streams);
     } else if (AVMATCH(&method, &av_publish)) {
+        ret = process_publish(r, &obj, pkt);
+    } else if (AVMATCH(&method, &av_closeStream)) {
+        ret = process_close(r, &obj, pkt);
     } else send_error(r, txn, "Unknown method");
     AMF_Reset(&obj);
     return ret;
@@ -308,7 +394,6 @@ static int handle_packet(RTMP *r, RTMPPacket *pkt)
     return RTMP_NB_OK;
 }
 
-#define MAXC 100
 static int setup_client(RTMP *rtmps, int *socks, int fd)
 {
     RTMP *r;
@@ -377,6 +462,7 @@ int main()
 {
     RTMP rtmps[MAXC];
     memset(rtmps, 0, sizeof(rtmps));
+    memset(streams, 0, sizeof(streams));
     int rtmpfd = setup_listen(1935);
     int httpfd = setup_listen(8080);
     int socks[MAXC], nb_socks = 0, i, smax = httpfd, nb_listeners = 2;
