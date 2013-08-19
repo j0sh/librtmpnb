@@ -2360,7 +2360,7 @@ static int
 SendBytesReceived(RTMP *r)
 {
     RTMPPacket packet;
-    char *pbuf = RTMP_PacketBody(r, 256), *pend = pbuf + 256;
+    char pbuf[256], *pend = pbuf + sizeof(pbuf);
 
     packet.m_nChannel = 0x02;	/* control channel (invoke) */
     packet.m_headerType = RTMP_PACKET_SIZE_MEDIUM;
@@ -4209,17 +4209,15 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
 
     RTMP_Log(RTMP_LOGDEBUG2, "%s: fd=%d, size=%d", __FUNCTION__, r->m_sb.sb_socket,
              nSize);
-    /* send all chunks in one HTTP request */
-    if (r->Link.protocol & RTMP_FEATURE_HTTP) {
+    /* send all chunks in one write request */
         int chunks = (nSize+nChunkSize-1) / nChunkSize;
         if (chunks > 1) {
             tlen = chunks * (cSize + 1) + nSize + hSize;
-            tbuf = malloc(tlen);
+        } else tlen = nSize + hSize;
+            tbuf = RTMP_PacketBody(r, tlen);
             if (!tbuf)
                 return FALSE;
             toff = tbuf;
-        }
-    }
 
     /* we invoked a remote method */
     if (packet->m_packetType == RTMP_PACKET_TYPE_INVOKE) {
@@ -4238,21 +4236,13 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
     }
 
     while (nSize + hSize) {
-        int wrote;
-
         if (nSize < nChunkSize)
             nChunkSize = nSize;
 
         RTMP_LogHexString(RTMP_LOGDEBUG2, (uint8_t *)header, hSize);
         RTMP_LogHexString(RTMP_LOGDEBUG2, (uint8_t *)buffer, nChunkSize);
-        if (tbuf) {
             memcpy(toff, header, nChunkSize + hSize);
             toff += nChunkSize + hSize;
-        } else {
-            wrote = WriteN2(r, header, nChunkSize + hSize);
-            if (!wrote)
-                return FALSE;
-        }
         nSize -= nChunkSize;
         buffer += nChunkSize;
         hSize = 0;
@@ -4273,13 +4263,9 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
             }
         }
     }
-    if (tbuf) {
         int wrote = WriteN2(r, tbuf, toff-tbuf);
-        free(tbuf);
-        tbuf = NULL;
         if (!wrote)
             return FALSE;
-    }
 
     if (!r->m_vecChannelsOut[packet->m_nChannel])
         r->m_vecChannelsOut[packet->m_nChannel] = malloc(sizeof(RTMPPacket));
@@ -5283,7 +5269,7 @@ RTMP_Write(RTMP *r, const char *buf, int size)
 
 char* RTMP_PacketBody(RTMP *r, int size)
 {
-    int hsz = RTMP_MAX_HEADER_SIZE, realsz;
+    int hsz = 0, realsz;
     char *body = r->wb.wb_buf + r->wb.wb_used;
     if (r->Link.protocol & RTMP_PROTOCOL_RTMP)
         hsz += RTMP_HTTP_HEADER_SIZE;

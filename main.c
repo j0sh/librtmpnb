@@ -74,11 +74,12 @@ SAVC(objectEncoding);
 SAVC(onStatus);
 SAVC(details);
 SAVC(clientid);
+SAVC(play);
 
 static int send_createstream_resp(RTMP *r, double txn, double ID)
 {
     RTMPPacket packet;
-    char *pbuf = RTMP_PacketBody(r, 256), *pend = pbuf + 256;
+    char pbuf[256], *pend = pbuf + sizeof(pbuf);
 
     packet.m_nChannel = 0x03;     // control channel (invoke)
     packet.m_headerType = 1; /* RTMP_PACKET_SIZE_MEDIUM; */
@@ -101,7 +102,7 @@ static int send_createstream_resp(RTMP *r, double txn, double ID)
 
 static int send_error(RTMP *r, double txn, char *desc)
 {
-    char *pbuf = RTMP_PacketBody(r, 384), *pend = pbuf + 384, *enc;
+    char pbuf[384], *pend = pbuf + sizeof(pbuf), *enc;
     RTMPPacket packet;
     AVal av;
 
@@ -135,7 +136,7 @@ static int send_error(RTMP *r, double txn, char *desc)
 static int send_onstatus(RTMP *r, double txn, int streamid, int chan,
     char *level, char *code, char *desc)
 {
-    char *pbuf = RTMP_PacketBody(r, 384), *pend = pbuf + 384, *enc;
+    char pbuf[384], *pend = pbuf + sizeof(pbuf), *enc;
     RTMPPacket packet;
     AVal av;
 
@@ -190,7 +191,7 @@ static int send_publish_start(RTMP *r, AMFObject *obj, RTMPPacket *pkt, char *sn
 static int send_cxn_resp(RTMP *r, double txn)
 {
   RTMPPacket packet;
-  char *pbuf = RTMP_PacketBody(r, 384), *pend = pbuf + 384, *enc;
+  char pbuf[384], *pend = pbuf + sizeof(pbuf), *enc;
   AMFObject obj;
   AMFObjectProperty p, op;
   AVal av;
