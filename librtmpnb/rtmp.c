@@ -4105,7 +4105,7 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
     uint32_t t;
     char *buffer, *tbuf = NULL, *toff = NULL;
     int nChunkSize;
-    int tlen;
+    int tlen, chunks, wrote;
 
     if (packet->m_nChannel >= r->m_channelsAllocatedOut) {
         int n = packet->m_nChannel + 10;
@@ -4114,7 +4114,9 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
             free(r->m_vecChannelsOut);
             r->m_vecChannelsOut = NULL;
             r->m_channelsAllocatedOut = 0;
-            return FALSE;
+            RTMP_Log(RTMP_LOGERROR, "RTMP_SendPacket Unable to "
+                     "reallocate packets!");
+            return RTMP_NB_ERROR;
         }
         r->m_vecChannelsOut = packets;
         memset(r->m_vecChannelsOut + r->m_channelsAllocatedOut, 0, sizeof(RTMPPacket*) * (n - r->m_channelsAllocatedOut));
@@ -4210,14 +4212,12 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
     RTMP_Log(RTMP_LOGDEBUG2, "%s: fd=%d, size=%d", __FUNCTION__, r->m_sb.sb_socket,
              nSize);
     /* send all chunks in one write request */
-        int chunks = (nSize+nChunkSize-1) / nChunkSize;
-        if (chunks > 1) {
-            tlen = chunks * (cSize + 1) + nSize + hSize;
-        } else tlen = nSize + hSize;
-            tbuf = RTMP_PacketBody(r, tlen);
-            if (!tbuf)
-                return FALSE;
-            toff = tbuf;
+    chunks = (nSize+nChunkSize-1) / nChunkSize;
+    if (chunks > 1) tlen = chunks * (cSize + 1) + nSize + hSize;
+    else tlen = nSize + hSize;
+    tbuf = RTMP_PacketBody(r, tlen);
+    if (!tbuf) return RTMP_NB_ERROR;
+    toff = tbuf;
 
     /* we invoked a remote method */
     if (packet->m_packetType == RTMP_PACKET_TYPE_INVOKE) {
@@ -4241,8 +4241,8 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
 
         RTMP_LogHexString(RTMP_LOGDEBUG2, (uint8_t *)header, hSize);
         RTMP_LogHexString(RTMP_LOGDEBUG2, (uint8_t *)buffer, nChunkSize);
-            memcpy(toff, header, nChunkSize + hSize);
-            toff += nChunkSize + hSize;
+        memcpy(toff, header, nChunkSize + hSize);
+        toff += nChunkSize + hSize;
         nSize -= nChunkSize;
         buffer += nChunkSize;
         hSize = 0;
@@ -4263,14 +4263,13 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
             }
         }
     }
-        int wrote = WriteN2(r, tbuf, toff-tbuf);
-        if (!wrote)
-            return FALSE;
+    wrote = WriteN2(r, tbuf, toff-tbuf);
+    if (!wrote) return RTMP_NB_ERROR;
 
     if (!r->m_vecChannelsOut[packet->m_nChannel])
         r->m_vecChannelsOut[packet->m_nChannel] = malloc(sizeof(RTMPPacket));
     memcpy(r->m_vecChannelsOut[packet->m_nChannel], packet, sizeof(RTMPPacket));
-    return TRUE;
+    return RTMP_NB_OK;
 }
 
 int
