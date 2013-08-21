@@ -20,6 +20,9 @@ typedef struct stream {
 } Stream;
 static Stream streams[MAXS];
 
+static RTMP contexts[MAXC];
+static RTMP *active_contexts[MAXC];
+
 static int setup_listen(int port)
 {
     struct sockaddr_in addr;
@@ -427,7 +430,7 @@ static int handle_packet(RTMP *r, RTMPPacket *pkt)
     return RTMP_NB_OK;
 }
 
-static int setup_client(RTMP *rtmps, int *socks, int fd)
+static int setup_client(int *socks, int fd)
 {
     RTMP *r;
     struct sockaddr_in dest;
@@ -445,9 +448,10 @@ static int setup_client(RTMP *rtmps, int *socks, int fd)
 
     fcntl(fd, F_SETFL, sockflags | O_NONBLOCK);
     socks[i] = fd;
-    r = &rtmps[i];
+    r = &contexts[i];
     RTMP_Init(r);
     r->m_sb.sb_socket = fd;
+    active_contexts[i] = r;
 
     printf("%s accepted connection from %s at index %d\n",
            __FUNCTION__, inet_ntoa(dest.sin_addr), i);
@@ -455,12 +459,12 @@ static int setup_client(RTMP *rtmps, int *socks, int fd)
     return 0;
 }
 
-static int cleanup_client(RTMP *rtmps, int *socks, int i)
+static int cleanup_client(int *socks, int i)
 {
-    int smax = -1;
-    printf("closing connection at index %d\n", i);
-    RTMP_Close(&rtmps[i]);
-    close(socks[i]);
+    int smax = -1, j;
+    RTMP *r = active_contexts[i];
+    printf("closing connection at index %d sockfd %d\n", i, socks[i]);
+    RTMP_Close(r);
     socks[i] = -1;
     for (i = 0; i < MAXC; i++) {
         if (socks[i] > smax) smax = socks[i];
@@ -493,9 +497,9 @@ srv_loop:
 
 int main()
 {
-    RTMP rtmps[MAXC];
-    memset(rtmps, 0, sizeof(rtmps));
     memset(streams, 0, sizeof(streams));
+    memset(&contexts, 0, sizeof(contexts));
+    memset(active_contexts, 0, sizeof(active_contexts));
     int rtmpfd = setup_listen(1935);
     int httpfd = setup_listen(8080);
     int socks[MAXC], nb_socks = 0, i, smax = httpfd, nb_listeners = 2;
@@ -519,7 +523,7 @@ while (1) {
         if (-1 == socks[i]) continue;
         FD_SET(socks[i], &rset);
         if (i < nb_listeners) continue;
-        if (rtmps[i].wq_ready) FD_SET(socks[i], &wset);
+        if (active_contexts[i]->wq_ready) FD_SET(socks[i], &wset);
     }
     ret = select(smax + 1, &rset, &wset, NULL, &t);
     if (-1 == ret) goto cleanup;
@@ -532,7 +536,7 @@ while (1) {
         if (sockfd <= 0 && EAGAIN != errno) {
             fprintf(stderr, "%s: accept failed", __FUNCTION__);
         } else if (sockfd >= 0) {
-            ret = setup_client(rtmps, socks, sockfd);
+            ret = setup_client(socks, sockfd);
             if (ret < 0) continue;
             nb_socks++;
             smax = sockfd > smax ? sockfd : smax;
@@ -541,16 +545,16 @@ while (1) {
 
     // check clients
     for (i = nb_listeners; i < MAXC; i++) {
-        RTMP *r = &rtmps[i];
+        int ret;
         if (-1 == socks[i] ||!FD_ISSET(socks[i], &rset)) continue;
-        if (RTMP_NB_ERROR != serve_client(r)) continue;
-        smax = cleanup_client(rtmps, socks, i);
+        if (RTMP_NB_ERROR != serve_client(active_contexts[i])) continue;
+        smax = cleanup_client(socks, i);
         nb_socks--;
     }
     for (i = nb_listeners; i < MAXC; i++) {
         if (-1 == socks[i] || !FD_ISSET(socks[i], &wset)) continue;
-        if (RTMP_NB_ERROR != RTMP_WriteQueued(&rtmps[i])) continue;
-        smax = cleanup_client(rtmps, socks, i);
+        if (RTMP_NB_ERROR != RTMP_WriteQueued(active_contexts[i])) continue;
+        smax = cleanup_client(socks, i);
         nb_socks--;
     }
 }
@@ -559,7 +563,7 @@ while (1) {
     return 0;
 cleanup:
     for (i = 0; i < MAXC; i++) {
-        RTMP_Close(&rtmps[i]);
+        RTMP_Close(active_contexts[i]);
         if (-1 != socks[i]) close(socks[i]);
     }
     printf("goodbye, sad world\n");
