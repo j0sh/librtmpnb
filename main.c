@@ -20,8 +20,17 @@ typedef struct stream {
 } Stream;
 static Stream streams[MAXS];
 
+typedef struct client {
+    RTMP *rtmp;
+    Stream *instreams[MAXS];
+    Stream *outstreams[MAXS];
+} Client;
+static Client clients[MAXC];
+
 static RTMP contexts[MAXC];
 static RTMP *active_contexts[MAXC];
+
+#define RTMPIDX(r) ((r) - &contexts[0])
 
 static int setup_listen(int port)
 {
@@ -173,6 +182,15 @@ static int send_onstatus(RTMP *r, double txn, int streamid, int chan,
     return RTMP_SendPacket(r, &packet, FALSE);
 }
 
+static int send_play_error(RTMP *r, AMFObject *obj, RTMPPacket *pkt,
+    char *desc)
+{
+    double txn = AMFProp_GetNumber(AMF_GetProp(obj, NULL, 1));
+    int sid = pkt->m_nInfoField2, chan = pkt->m_nChannel;
+    return send_onstatus(r, txn, sid, chan, "error",
+                         "NetStream.Play.BadName", desc);
+}
+
 static int send_publish_error(RTMP *r, AMFObject *obj, RTMPPacket *pkt,
     char *desc)
 {
@@ -248,6 +266,20 @@ static int send_cxn_resp(RTMP *r, double txn)
 
 }
 
+static int send_media(RTMP *r, RTMPPacket *inpkt)
+{
+    RTMPPacket packet;
+    if (!RTMP_IsConnected(r)) return RTMP_NB_ERROR;
+    memset(&packet, 0, sizeof(RTMPPacket));
+    packet.m_nChannel = inpkt->m_nChannel;
+    packet.m_headerType = 1;
+    packet.m_packetType = inpkt->m_packetType;
+    packet.m_nTimeStamp = inpkt->m_nTimeStamp;
+    packet.m_nBodySize = inpkt->m_nBodySize;
+    packet.m_body = inpkt->m_body;
+    return RTMP_SendPacket(r, &packet, FALSE);
+}
+
 static void process_cxn(RTMP *r, AMFObject *obj)
 {
     AMFObject cobj;
@@ -282,6 +314,47 @@ static void free_aval(AVal *val)
     free(val->av_val);
     val->av_val = NULL;
     val->av_len = 0;
+}
+
+static int process_play(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
+{
+    int i, idx = RTMPIDX(r);
+    AVal name;
+    Stream *st;
+    Client *c;
+    AMFProp_GetString(AMF_GetProp(obj, NULL, 3), &name);
+    if (!name.av_len) {
+        RTMP_Log(RTMP_LOGWARNING, "%s No stream name given",
+                 __FUNCTION__);
+        return RTMP_NB_ERROR;
+    }
+    for (i = 0; i < MAXS; i++) {
+        if (!streams[i].name.av_val) continue;
+        if (AVMATCH(&name, &streams[i].name)) break;
+    }
+    if (i == MAXS) {
+        RTMP_Log(RTMP_LOGWARNING, "%s No stream found",
+                 __FUNCTION__);
+        // TODO create stream here and wait for it
+        return RTMP_NB_OK;
+    }
+    // set consumer in stream
+    st = &streams[i];
+    st->consumers[idx] = r;
+    c = &clients[idx];
+    // set stream in client context
+    for (i = 0; i < MAXS; i++) {
+        if (c->outstreams[i]) continue;
+        c->outstreams[i] = st;
+        break;
+    }
+    if (i == MAXS) {
+        RTMP_Log(RTMP_LOGWARNING, "%s Maximum # of streams reached",
+                 __FUNCTION__);
+        return send_play_error(r, obj, pkt,
+                               "Maximum number of streams reached");
+    }
+    return RTMP_NB_OK;
 }
 
 static int process_publish(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
@@ -371,6 +444,8 @@ static int handle_invoke(RTMP *r, RTMPPacket *pkt)
         send_cxn_resp(r, txn);
     } else if (AVMATCH(&method, &av_createStream)) {
         send_createstream_resp(r, txn, ++nb_streams);
+    } else if (AVMATCH(&method, &av_play)) {
+        ret = process_play(r, &obj, pkt);
     } else if (AVMATCH(&method, &av_publish)) {
         ret = process_publish(r, &obj, pkt);
     } else if (AVMATCH(&method, &av_closeStream)) {
@@ -405,6 +480,26 @@ control_error:
     return RTMP_NB_ERROR;
 }
 
+static int handle_media(RTMP *r, RTMPPacket *pkt)
+{
+    int i, err, id = pkt->m_nInfoField2;
+    Stream *st;
+    for (i = 0; i < MAXS && id != streams[i].id; i++) ;
+    if (i == MAXS) {
+        RTMP_Log(RTMP_LOGERROR, "%s Stream %d not found!",
+                 __FUNCTION__, id);
+        return RTMP_NB_ERROR;
+    }
+    st = &streams[i];
+    for (i = 0; i < MAXC; i++) {
+        if (!st->consumers[i]) continue;
+        if (RTMP_NB_OK != (err = send_media(st->consumers[i], pkt))) {
+            return err;
+        }
+    }
+    return RTMP_NB_OK;
+}
+
 static int handle_packet(RTMP *r, RTMPPacket *pkt)
 {
     switch (pkt->m_packetType) {
@@ -415,7 +510,7 @@ static int handle_packet(RTMP *r, RTMPPacket *pkt)
         return handle_notify(r, pkt);
     case RTMP_PACKET_TYPE_AUDIO:
     case RTMP_PACKET_TYPE_VIDEO:
-        break;
+        return handle_media(r, pkt);
     case RTMP_PACKET_TYPE_CONTROL:
         return handle_control(r, pkt);
     case RTMP_PACKET_TYPE_SERVER_BW:
@@ -452,6 +547,7 @@ static int setup_client(int *socks, int fd)
     RTMP_Init(r);
     r->m_sb.sb_socket = fd;
     active_contexts[i] = r;
+    clients[i].rtmp = r;
 
     printf("%s accepted connection from %s at index %d\n",
            __FUNCTION__, inet_ntoa(dest.sin_addr), i);
@@ -463,12 +559,31 @@ static int cleanup_client(int *socks, int i)
 {
     int smax = -1, j;
     RTMP *r = active_contexts[i];
+    Client *c = &clients[i];
     printf("closing connection at index %d sockfd %d\n", i, socks[i]);
     RTMP_Close(r);
     socks[i] = -1;
     for (i = 0; i < MAXC; i++) {
         if (socks[i] > smax) smax = socks[i];
     }
+    // clear any streams
+    if (!c || r != c->rtmp) {
+        RTMP_Log(RTMP_LOGWARNING, "%s RTMP and client context "
+                 "mismatch", __FUNCTION__);
+        return smax;
+    }
+    for (j = 0; j < MAXS; j++) {
+        int k;
+        Stream *s = c->outstreams[j];
+        if (!s) continue;
+        for (k = 0; k < MAXC; k++) {
+            if (!s->consumers[k] || s->consumers[k] != r) continue;
+            s->consumers[k] = NULL;
+        }
+        c->outstreams[j] = NULL;
+        c->instreams[j] = NULL; // TODO clean up this one as well
+    }
+    c->rtmp = NULL;
     return smax;
 }
 
