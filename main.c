@@ -15,6 +15,12 @@
 typedef struct stream {
     AVal name;
     int id;           // source id
+    int metadata_sz;
+    int avc_seq_sz;
+    int aac_seq_sz;
+    uint8_t *metadata;
+    uint8_t *avc_seq;
+    uint8_t aac_seq[4];
     RTMP *producer;
     RTMP *consumers[MAXC];
 } Stream;
@@ -65,6 +71,34 @@ static int setup_listen(int port)
     return sockfd;
 }
 
+/*     each stream has 5 chunks; the last 2 are unknown.
+       0 and 1 are used for signalling large chunk/channel IDs,
+       while 2 and 3 are used for protocol control.
+
+       stream       channel id      type
+          1              4            data
+          1              5           audio
+          1              6           video
+          2              9            data
+          2             10           audio
+                ... and so on ...           */
+static inline int calc_channel(int stream_id, int type_offset)
+{
+    return (stream_id - 1) * 5 + type_offset;
+}
+static inline int data_channel(int stream_id)
+{
+    return calc_channel(stream_id, 4);
+}
+static inline int audio_channel(int stream_id)
+{
+    return calc_channel(stream_id, 5);
+}
+static inline int video_channel(int stream_id)
+{
+    return calc_channel(stream_id, 6);
+}
+
 #define SAVC(x) static const AVal av_##x = AVC(#x)
 #define STR2AVAL(av,str) av.av_val = str; av.av_len = strlen(av.av_val)
 
@@ -109,6 +143,7 @@ static int send_createstream_resp(RTMP *r, double txn, double ID)
 
     packet.m_nBodySize = enc - packet.m_body;
 
+    r->m_stream_id = ID;
     return RTMP_SendPacket(r, &packet, FALSE);
 }
 
@@ -186,7 +221,7 @@ static int send_play_error(RTMP *r, AMFObject *obj, RTMPPacket *pkt,
     char *desc)
 {
     double txn = AMFProp_GetNumber(AMF_GetProp(obj, NULL, 1));
-    int sid = pkt->m_nInfoField2, chan = pkt->m_nChannel;
+    int sid = r->m_stream_id, chan = audio_channel(sid);
     return send_onstatus(r, txn, sid, chan, "error",
                          "NetStream.Play.BadName", desc);
 }
@@ -266,12 +301,21 @@ static int send_cxn_resp(RTMP *r, double txn)
 
 }
 
+static inline int chan(int stream_id, int pkt_type) // choose channel
+{
+    switch (pkt_type) {
+    case RTMP_PACKET_TYPE_AUDIO: return audio_channel(stream_id);
+    case RTMP_PACKET_TYPE_VIDEO: return video_channel(stream_id);
+    default: return data_channel(stream_id);
+    }
+}
+
 static int send_media(RTMP *r, RTMPPacket *inpkt)
 {
     RTMPPacket packet;
     if (!RTMP_IsConnected(r)) return RTMP_NB_ERROR;
     memset(&packet, 0, sizeof(RTMPPacket));
-    packet.m_nChannel = inpkt->m_nChannel;
+    packet.m_nChannel = chan(r->m_stream_id, inpkt->m_packetType);
     packet.m_headerType = 1;
     packet.m_packetType = inpkt->m_packetType;
     packet.m_nTimeStamp = inpkt->m_nTimeStamp;
@@ -316,6 +360,38 @@ static void free_aval(AVal *val)
     val->av_len = 0;
 }
 
+static int send_streaminfo(RTMP *r, Stream *st)
+{
+    int err;
+    RTMPPacket packet = {0};
+    packet.m_nInfoField2 = r->m_stream_id;
+    if (st->metadata_sz) {
+        packet.m_nChannel = audio_channel(r->m_stream_id);
+        packet.m_packetType = RTMP_PACKET_TYPE_INFO;
+        packet.m_body = st->metadata;
+        packet.m_nBodySize = st->metadata_sz;
+        if (RTMP_NB_OK != (err = RTMP_SendPacket(r, &packet, FALSE)))
+            return err;
+    }
+    if (st->avc_seq_sz) {
+        packet.m_nChannel = video_channel(r->m_stream_id);
+        packet.m_packetType = RTMP_PACKET_TYPE_VIDEO;
+        packet.m_body = st->avc_seq;
+        packet.m_nBodySize = st->avc_seq_sz;
+        if (RTMP_NB_OK != (err = RTMP_SendPacket(r, &packet, FALSE)))
+            return err;
+    }
+    if (st->aac_seq_sz) {
+        packet.m_nChannel = audio_channel(r->m_stream_id);
+        packet.m_packetType = RTMP_PACKET_TYPE_AUDIO;
+        packet.m_body = st->aac_seq;
+        packet.m_nBodySize = st->aac_seq_sz;
+        if (RTMP_NB_OK != (err = RTMP_SendPacket(r, &packet, FALSE)))
+            return err;
+    }
+    return RTMP_NB_OK;
+}
+
 static int process_play(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
 {
     int i, idx = RTMPIDX(r);
@@ -354,7 +430,9 @@ static int process_play(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
         return send_play_error(r, obj, pkt,
                                "Maximum number of streams reached");
     }
-    return RTMP_NB_OK;
+    if (RTMP_NB_OK != RTMP_SendCtrl(r, 0, r->m_stream_id, 0))
+        return RTMP_NB_ERROR;
+    return send_streaminfo(r, st);
 }
 
 static int process_publish(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
@@ -407,6 +485,11 @@ static int process_close(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
              __FUNCTION__, streams[i].name.av_val);
     free_aval(&streams[i].name);
     streams[i].producer = NULL;
+    if (streams[i].metadata) free(streams[i].metadata);
+    if (streams[i].avc_seq) free(streams[i].avc_seq);
+    streams[i].metadata = streams[i].avc_seq = NULL;
+    streams[i].metadata_sz = 0;
+    streams[i].avc_seq_sz = streams[i].aac_seq_sz = 0;
     return RTMP_NB_OK;
 }
 
@@ -457,6 +540,43 @@ static int handle_invoke(RTMP *r, RTMPPacket *pkt)
 
 static int handle_notify(RTMP *r, RTMPPacket *pkt)
 {
+    // XXX hack for leading whitespace in 0x0f messages
+    char *body = pkt->m_body;
+    int size = pkt->m_nBodySize;
+    while (!*body) {
+        body++;
+        size--;
+    }
+    if (!memcmp("\x02\x00\x0d@setDataFrame\x02\x00\x0aonMetaData",
+                body, 29)) {
+        Stream *st;
+        int sid = pkt->m_nInfoField2, i;
+        for (i = 0; i < MAXS && sid != streams[i].id; i++) {
+            if (!streams[i].name.av_val) continue;
+        }
+        if (i == MAXS) {
+            RTMP_Log(RTMP_LOGWARNING, "%s No notify stream found",
+                     __FUNCTION__);
+            return RTMP_NB_ERROR; // send message to client ??
+        }
+        st = &streams[i];
+        if (st->metadata_sz && st->metadata) {
+            RTMP_Log(RTMP_LOGINFO, "%s Resetting metadata",
+                     __FUNCTION__);
+            free(st->metadata);
+            st->metadata_sz = 0;
+        }
+        body += 16; // skip @setDataFrame only
+        size -= 16;
+        st->metadata = malloc(size);
+        if (!st->metadata) {
+            RTMP_Log(RTMP_LOGERROR, "Unable to malloc metadata!");
+            exit(1);
+        }
+        st->metadata_sz = size;
+        memcpy(st->metadata, body, size);
+        RTMP_Log(RTMP_LOGINFO, "%s Setting metadata", __FUNCTION__);
+    }
     return RTMP_NB_OK;
 }
 
@@ -491,6 +611,48 @@ static int handle_media(RTMP *r, RTMPPacket *pkt)
         return RTMP_NB_ERROR;
     }
     st = &streams[i];
+    switch(pkt->m_packetType) {
+    case RTMP_PACKET_TYPE_AUDIO:
+        if (pkt->m_nBodySize <= 2) break;
+        if (160 == (pkt->m_body[0] & 0xf0) && !pkt->m_body[1]) {
+            RTMP_Log(RTMP_LOGINFO, "%s Got AAC sequence header",
+                     __FUNCTION__);
+            if (4 != pkt->m_nBodySize) {
+                RTMP_Log(RTMP_LOGWARNING,
+                         "%s AAC seq header unexpected size %d!",
+                         __FUNCTION__, pkt->m_nBodySize);
+                return RTMP_NB_OK;
+            }
+            st->aac_seq_sz = pkt->m_nBodySize;
+            memcpy(st->aac_seq, pkt->m_body, st->aac_seq_sz);
+        }
+        break;
+    case RTMP_PACKET_TYPE_VIDEO:
+        if (7 == (pkt->m_body[0] & 0x0f) && !pkt->m_body[1]) {
+            if (st->avc_seq && st->avc_seq_sz != pkt->m_nBodySize) {
+                RTMP_Log(RTMP_LOGWARNING,
+                         "%s Clearing previous AVC sequence header",
+                         __FUNCTION__);
+                free(st->avc_seq);
+                st->avc_seq_sz = 0;
+                st->avc_seq = malloc(pkt->m_nBodySize);
+                RTMP_Log(RTMP_LOGINFO, "%s Resizing AVC sequence hdr",
+                         __FUNCTION__);
+            } else if (!st->avc_seq) {
+                st->avc_seq = malloc(pkt->m_nBodySize);
+                RTMP_Log(RTMP_LOGINFO, "%s Got AVC sequence header",
+                         __FUNCTION__);
+            }
+            if (!st->avc_seq) {
+                RTMP_Log(RTMP_LOGERROR, "Unable to malloc AVC seq!");
+                exit(1);
+            }
+            st->avc_seq_sz = pkt->m_nBodySize;
+            memcpy(st->avc_seq, pkt->m_body, st->avc_seq_sz);
+        }
+        break;
+    default: break;
+    }
     for (i = 0; i < MAXC; i++) {
         if (!st->consumers[i]) continue;
         if (RTMP_NB_OK != (err = send_media(st->consumers[i], pkt))) {
