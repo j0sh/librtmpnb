@@ -4105,7 +4105,7 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
     uint32_t t;
     char *buffer, *tbuf = NULL, *toff = NULL;
     int nChunkSize;
-    int tlen, chunks, wrote;
+    int tlen, chunks, wrote, psz;
 
     if (packet->m_nChannel >= r->m_channelsAllocatedOut) {
         int n = packet->m_nChannel + 10;
@@ -4143,32 +4143,38 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
         return FALSE;
     }
 
-    nSize = packetSize[packet->m_headerType];
-    hSize = nSize;
+    psz = hSize = packetSize[packet->m_headerType];
     cSize = 0;
     t = packet->m_nTimeStamp - last;
-
-    if (packet->m_body) {
-        header = packet->m_body - nSize;
-        hend = packet->m_body;
-    } else {
-        header = hbuf + 6;
-        hend = hbuf + sizeof(hbuf);
-    }
 
     if (packet->m_nChannel > 319)
         cSize = 2;
     else if (packet->m_nChannel > 63)
         cSize = 1;
     if (cSize) {
-        header -= cSize;
         hSize += cSize;
     }
 
-    if (nSize > 1 && t >= 0xffffff) {
-        header -= 4;
+    if (psz > 1 && t >= 0xffffff) {
         hSize += 4;
     }
+
+    nSize = packet->m_nBodySize;
+    buffer = packet->m_body;
+    nChunkSize = r->m_outChunkSize;
+
+    RTMP_Log(RTMP_LOGDEBUG2, "%s: fd=%d, size=%d", __FUNCTION__, r->m_sb.sb_socket,
+             nSize);
+    /* send all chunks in one write request */
+    chunks = (nSize+nChunkSize-1) / nChunkSize;
+    if (chunks > 1) tlen = chunks * (cSize + 1) + nSize + hSize - 1;
+    else tlen = nSize + hSize;
+    tbuf = RTMP_PacketBody(r, tlen);
+    if (!tbuf) return RTMP_NB_ERROR;
+    toff = tbuf;
+    if (packet->m_body) header = toff;
+    else header = hbuf + sizeof(hbuf) - hSize;
+    hend = header + hSize;
 
     hptr = header;
     c = packet->m_headerType << 6;
@@ -4190,34 +4196,20 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
             *hptr++ = tmp >> 8;
     }
 
-    if (nSize > 1) {
+    if (psz > 1) {
         hptr = AMF_EncodeInt24(hptr, hend, t > 0xffffff ? 0xffffff : t);
     }
 
-    if (nSize > 4) {
+    if (psz > 4) {
         hptr = AMF_EncodeInt24(hptr, hend, packet->m_nBodySize);
         *hptr++ = packet->m_packetType;
     }
 
-    if (nSize > 8)
+    if (psz > 8)
         hptr += EncodeInt32LE(hptr, packet->m_nInfoField2);
 
-    if (nSize > 1 && t >= 0xffffff)
+    if (psz > 1 && t >= 0xffffff)
         hptr = AMF_EncodeInt32(hptr, hend, t);
-
-    nSize = packet->m_nBodySize;
-    buffer = packet->m_body;
-    nChunkSize = r->m_outChunkSize;
-
-    RTMP_Log(RTMP_LOGDEBUG2, "%s: fd=%d, size=%d", __FUNCTION__, r->m_sb.sb_socket,
-             nSize);
-    /* send all chunks in one write request */
-    chunks = (nSize+nChunkSize-1) / nChunkSize;
-    if (chunks > 1) tlen = chunks * (cSize + 1) + nSize + hSize;
-    else tlen = nSize + hSize;
-    tbuf = RTMP_PacketBody(r, tlen);
-    if (!tbuf) return RTMP_NB_ERROR;
-    toff = tbuf;
 
     /* we invoked a remote method */
     if (packet->m_packetType == RTMP_PACKET_TYPE_INVOKE) {
@@ -4235,32 +4227,31 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
         }
     }
 
-    while (nSize + hSize) {
+    toff = hptr;
+    while (nSize) {
         if (nSize < nChunkSize)
             nChunkSize = nSize;
 
         RTMP_LogHexString(RTMP_LOGDEBUG2, (uint8_t *)header, hSize);
         RTMP_LogHexString(RTMP_LOGDEBUG2, (uint8_t *)buffer, nChunkSize);
-        memcpy(toff, header, nChunkSize + hSize);
-        toff += nChunkSize + hSize;
+        memcpy(toff, buffer, nChunkSize);
+
+        toff += nChunkSize;
         nSize -= nChunkSize;
         buffer += nChunkSize;
-        hSize = 0;
 
         if (nSize > 0) {
-            header = buffer - 1;
+            header = toff;
             hSize = 1;
-            if (cSize) {
-                header -= cSize;
-                hSize += cSize;
-            }
             *header = (0xc0 | c);
             if (cSize) {
                 int tmp = packet->m_nChannel - 64;
+                hSize += cSize;
                 header[1] = tmp & 0xff;
                 if (cSize == 2)
                     header[2] = tmp >> 8;
             }
+            toff += hSize;
         }
     }
     wrote = WriteN2(r, tbuf, toff-tbuf);
