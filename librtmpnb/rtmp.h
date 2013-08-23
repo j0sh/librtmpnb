@@ -153,13 +153,9 @@ extern "C"
         int wb_sz;
         int wb_written;
         int wb_used;
+        int wb_ready;
         char *wb_buf;
     } RTMPWriteBuf;
-
-    typedef struct RTMPWriteQueue {
-        int wq_sz;
-        char *wq_buf;
-    } RTMPWriteQueue;
 
     void RTMPPacket_Reset(RTMPPacket *p);
     void RTMPPacket_Dump(RTMPPacket *p);
@@ -303,8 +299,6 @@ extern "C"
         int m_unackd;
         int m_decrypted;
         uint8_t hbuf[RTMP_MAX_HEADER_SIZE];
-#define WQSZ 64
-        int wq_rpos, wq_wpos, wq_ready;
         AVal m_clientID;
 
         RTMP_READ m_read;
@@ -313,7 +307,6 @@ extern "C"
         RTMP_LNK Link;
         RTMP_HSContext m_HSContext;
         RTMPWriteBuf wb;
-        RTMPWriteQueue wq[WQSZ];
     } RTMP;
 
     int RTMP_ParseURL(const char *url, int *protocol, AVal *host,

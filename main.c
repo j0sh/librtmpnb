@@ -642,7 +642,7 @@ while (1) {
         if (-1 == socks[i]) continue;
         FD_SET(socks[i], &rset);
         if (i < nb_listeners) continue;
-        if (active_contexts[i]->wq_ready) FD_SET(socks[i], &wset);
+        if (active_contexts[i]->wb.wb_ready) FD_SET(socks[i], &wset);
     }
     ret = select(smax + 1, &rset, &wset, NULL, &t);
     if (-1 == ret) goto cleanup;

@@ -1777,15 +1777,7 @@ static int WriteN2(RTMP *r, const char *buffer, int n)
         return RTMP_NB_ERROR;
     }
 
-    if (r->wq[r->wq_wpos].wq_sz) {
-        RTMP_Log(RTMP_LOGWARNING, "%s Write buffer nonempty! "
-                 "Consider enlarging buffer?", __FUNCTION__);
-        return RTMP_NB_OK; // just drop the packet, i guess
-    }
-    r->wq[r->wq_wpos].wq_sz = nBytes;
-    r->wq[r->wq_wpos].wq_buf = c;
-    r->wq_wpos = (r->wq_wpos + 1) & (WQSZ-1);
-    r->wq_ready++;
+    r->wb.wb_ready = 1;
 
     return nBytes;
 }
@@ -4401,7 +4393,6 @@ RTMP_Close(RTMP *r)
     if (r->wb.wb_buf) free(r->wb.wb_buf);
     r->wb.wb_written = r->wb.wb_used = r->wb.wb_sz = 0;
     r->wb.wb_buf = NULL;
-    memset(&r->wq, 0, sizeof(r->wq));
 }
 
 int
@@ -5260,7 +5251,7 @@ RTMP_Write(RTMP *r, const char *buf, int size)
 char* RTMP_PacketBody(RTMP *r, int size)
 {
     int hsz = 0, realsz;
-    char *body = r->wb.wb_buf + r->wb.wb_used;
+    char *body;
     if (r->Link.protocol & RTMP_PROTOCOL_RTMP)
         hsz += RTMP_HTTP_HEADER_SIZE;
     realsz = size + hsz;
@@ -5283,22 +5274,28 @@ char* RTMP_PacketBody(RTMP *r, int size)
         RTMP_Log(RTMP_LOGERROR, "Unable to realloc packet body!");
         exit(1);
     }
-    body = r->wb.wb_buf + r->wb.wb_used;
 
 pb_finish:
+    body = r->wb.wb_buf + r->wb.wb_used;
     r->wb.wb_used += realsz;
     return body + hsz;
 }
 
 int RTMP_WriteQueued(RTMP *r)
 {
-    RTMPWriteQueue *wq;
-    int n, total = 0;
+    int n, total = 0, sz;
+    char *buf;
 
 tryagain:
-    if (!r->wq_ready) return total;
-    wq = &r->wq[r->wq_rpos];
-    n = RTMPSockBuf_Send(&r->m_sb, wq->wq_buf, wq->wq_sz);
+    sz = r->wb.wb_used - r->wb.wb_written;
+    buf = r->wb.wb_buf + r->wb.wb_written;
+    if (!sz) return total;
+    if (sz < 0) {
+        RTMP_Log(RTMP_LOGERROR, "%s Size to write is < 0 !!",
+                 __FUNCTION__);
+        return RTMP_NB_ERROR;
+    }
+    n = RTMPSockBuf_Send(&r->m_sb, buf, sz);
     if (n < 0) {
         int sockerr = GetSockError();
 
@@ -5312,13 +5309,8 @@ tryagain:
         return RTMP_NB_ERROR;
     }
     total += n;
+    sz -= n;
     r->wb.wb_written += n;
-    wq->wq_sz -= n;
-    wq->wq_buf += n;
-    if (!wq->wq_sz) {
-        r->wq_rpos = (r->wq_rpos + 1) & (WQSZ-1);
-        r->wq_ready--;
-        goto tryagain;
-    }
+    r->wb.wb_ready = !!sz;
     return total;
 }
