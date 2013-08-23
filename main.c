@@ -517,6 +517,10 @@ static int handle_packet(RTMP *r, RTMPPacket *pkt)
         RTMP_Log(RTMP_LOGINFO, "%s Got server BW; not doing anything",
                  __FUNCTION__);
         break;
+    case RTMP_PACKET_TYPE_BYTES_READ_REPORT:
+        RTMP_Log(RTMP_LOGINFO, "%s Got Bytes Read Report",
+                 __FUNCTION__);
+        break;
     default:
         fprintf(stderr, "Got unhandled packet type %d\n",
                 pkt->m_packetType);
