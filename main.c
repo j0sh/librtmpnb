@@ -226,6 +226,24 @@ static int send_play_error(RTMP *r, AMFObject *obj, RTMPPacket *pkt,
                          "NetStream.Play.BadName", desc);
 }
 
+static int send_play_start(RTMP *r, AMFObject *obj, RTMPPacket *pkt,
+    char *desc)
+{
+    double txn = AMFProp_GetNumber(AMF_GetProp(obj, NULL, 1));
+    int sid = pkt->m_nInfoField2, chan = audio_channel(sid);
+    return send_onstatus(r, txn, sid, chan, "status",
+                         "NetStream.Play.Start", desc);
+}
+
+static int send_play_reset(RTMP *r, AMFObject *obj, RTMPPacket *pkt,
+    char *desc)
+{
+    double txn = AMFProp_GetNumber(AMF_GetProp(obj, NULL, 1));
+    int sid = pkt->m_nInfoField2, chan = audio_channel(sid);
+    return send_onstatus(r, txn, sid, chan, "status",
+                         "NetStream.Play.Reset", desc);
+}
+
 static int send_publish_error(RTMP *r, AMFObject *obj, RTMPPacket *pkt,
     char *desc)
 {
@@ -394,11 +412,14 @@ static int send_streaminfo(RTMP *r, Stream *st)
 
 static int process_play(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
 {
-    int i, idx = RTMPIDX(r);
+    int i, idx = RTMPIDX(r), reset = 0, err;
     AVal name;
     Stream *st;
     Client *c;
     AMFProp_GetString(AMF_GetProp(obj, NULL, 3), &name);
+    if (obj->o_num > 6)
+        reset = AMFProp_GetBoolean(AMF_GetProp(obj, NULL, 6));
+
     if (!name.av_len) {
         RTMP_Log(RTMP_LOGWARNING, "%s No stream name given",
                  __FUNCTION__);
@@ -432,6 +453,13 @@ static int process_play(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
     }
     if (RTMP_NB_OK != RTMP_SendCtrl(r, 0, r->m_stream_id, 0))
         return RTMP_NB_ERROR;
+    if (reset) {
+        if (RTMP_NB_OK != (err = send_play_reset(r, obj, pkt,
+            "Resetting stream"))) {
+            return err;
+        }
+    }
+    if (RTMP_NB_OK != send_play_start(r, obj, pkt, "Playing stream"));
     return send_streaminfo(r, st);
 }
 
