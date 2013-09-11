@@ -351,6 +351,7 @@ RTMP_Init(RTMP *r)
     r->m_fVideoCodecs = 252.0;
     r->Link.timeout = 30;
     r->Link.swfAge = 30;
+    r->m_pollInterval = 1;
     r->m_HSContext.state = HANDSHAKE_1;
     if (r->wb.wb_buf) free(r->wb.wb_buf);
     r->wb.wb_buf =  NULL;
@@ -1374,27 +1375,29 @@ extern FILE *netstackdump_read;
 #endif
 
 #define RTMP_HTTP_HEADER_SIZE 512
-static int HTTP_ResponseHeader(RTMP* r, char *c, int cl,
-    int prefix)
+static int HTTP_ResponseHeader(RTMP* r, char *hbuf, int cl)
 {
-    char hbuf[RTMP_HTTP_HEADER_SIZE];
-    int hlen = snprintf(hbuf, sizeof(hbuf),
+    int prefix = r->m_pollInterval;
+    int hlen = snprintf(hbuf, RTMP_HTTP_HEADER_SIZE,
         "HTTP/1.1 200 OK\r\n"
         "Content-Length: %d\r\n\r\n",
-        cl + !!prefix);
+        cl + !!prefix);                     // assumes prefix <= 0xf
     if (prefix) hbuf[hlen++] = prefix;
-    // assume RTMP_PacketBody has already inserted padding
-    memcpy(c - hlen, hbuf, hlen);
     return hlen;
 }
 
 int HTTP_respond(RTMP  *r, const char *content, int cl, uint8_t prefix)
 {
-    char *c = RTMP_PacketBody(r, cl);
-    int hlen = HTTP_ResponseHeader(r, c, cl, prefix);
+    // TODO check RTMPTE
+    char *c;
+    int old = r->m_pollInterval;
+    if (!prefix) r->m_pollInterval = 0;
+    c = RTMP_PacketBody(r, cl);
     if (!c) return RTMP_NB_ERROR;
     memcpy(c, content, cl);
-    return RTMPSockBuf_Send(&r->m_sb, c, cl+hlen);
+    WriteN2(r, c, cl);
+    if (!prefix) r->m_pollInterval = old;
+    return RTMP_NB_OK;
 }
 
 #define HTTPIDSZ 2
@@ -1767,10 +1770,7 @@ static int WriteN2(RTMP *r, const char *buffer, int n)
     }
 #endif
 
-    if (r->Link.protocol & RTMP_FEATURE_SHTTP) {
-        nBytes = n + HTTP_ResponseHeader(r, c, n, 1);
-        c -= nBytes - n;
-    } else if (r->Link.protocol & RTMP_FEATURE_HTTP) {
+    if (r->Link.protocol & RTMP_FEATURE_HTTP) {
         RTMP_Log(RTMP_LOGERROR, "%s RTMPT client unsupported",
                  __FUNCTION__);
         // nBytes = HTTP_Post(r, RTMPT_SEND, buffer, n);
@@ -5252,7 +5252,7 @@ char* RTMP_PacketBody(RTMP *r, int size)
 {
     int hsz = 0, realsz;
     char *body;
-    if (r->Link.protocol & RTMP_PROTOCOL_RTMP)
+    if (r->Link.protocol & RTMP_PROTOCOL_RTMPT)
         hsz += RTMP_HTTP_HEADER_SIZE;
     realsz = size + hsz;
     if (r->wb.wb_written == r->wb.wb_used) {
@@ -5278,6 +5278,10 @@ char* RTMP_PacketBody(RTMP *r, int size)
 pb_finish:
     body = r->wb.wb_buf + r->wb.wb_used;
     r->wb.wb_used += realsz;
+    if (r->Link.protocol & RTMP_FEATURE_SHTTP) {
+        hsz = HTTP_ResponseHeader(r, body, size);
+        r->wb.wb_used -= (RTMP_HTTP_HEADER_SIZE - hsz);
+    }
     return body + hsz;
 }
 

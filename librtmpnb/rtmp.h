@@ -297,6 +297,8 @@ extern "C"
         int m_polling;
         int m_resplen;
         int m_unackd;
+        int m_pollInterval;
+
         int m_decrypted;
         uint8_t hbuf[RTMP_MAX_HEADER_SIZE];
         AVal m_clientID;
