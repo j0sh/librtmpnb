@@ -719,13 +719,14 @@ static int handle_packet(RTMP *r, RTMPPacket *pkt)
     return RTMP_NB_OK;
 }
 
-static int setup_client(int *socks, int fd)
+static int setup_client(int *socks, int fd, int is_http)
 {
     RTMP *r;
     struct sockaddr_in dest;
     int i, sockflags = fcntl(fd, F_GETFL, 0);
+    char ip[INET6_ADDRSTRLEN];
     socklen_t destlen = sizeof(struct sockaddr_in);
-    getsockopt(fd, SOL_IP, SO_ORIGINAL_DST, &dest, &destlen);
+    getsockname(fd, (struct sockaddr*)&dest, &destlen);
 
     for (i = 0; i < MAXC; i++) {
         if (socks[i] == -1) break;
@@ -743,8 +744,13 @@ static int setup_client(int *socks, int fd)
     active_contexts[i] = r;
     clients[i].rtmp = r;
 
+    // ipv4 only for now
+    if (!inet_ntop(dest.sin_family, &dest.sin_addr, ip, destlen)) {
+        RTMP_Log(RTMP_LOGERROR, "Couldn't get incoming IP address!");
+        return -1;
+    }
     printf("%s accepted connection from %s at index %d\n",
-           __FUNCTION__, inet_ntoa(dest.sin_addr), i);
+           __FUNCTION__, ip, i);
 
     return 0;
 }
