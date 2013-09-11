@@ -628,6 +628,19 @@ control_error:
     return RTMP_NB_ERROR;
 }
 
+static int handle_chunksize(RTMP *r, RTMPPacket *packet)
+{
+    if (packet->m_nBodySize < 4) {
+        RTMP_Log(RTMP_LOGWARNING, "%s Not enough bytes in packet",
+                 __FUNCTION__);
+        return RTMP_NB_ERROR;
+    }
+    r->m_inChunkSize = AMF_DecodeInt32(packet->m_body);
+    RTMP_Log(RTMP_LOGINFO, "%s Incoming chunk size changed to %d",
+             __FUNCTION__, r->m_inChunkSize);
+    return RTMP_NB_OK;
+}
+
 static int handle_media(RTMP *r, RTMPPacket *pkt)
 {
     int i, err, id = pkt->m_nInfoField2;
@@ -693,6 +706,8 @@ static int handle_media(RTMP *r, RTMPPacket *pkt)
 static int handle_packet(RTMP *r, RTMPPacket *pkt)
 {
     switch (pkt->m_packetType) {
+    case RTMP_PACKET_TYPE_CHUNK_SIZE:
+        return handle_chunksize(r, pkt);
     case RTMP_PACKET_TYPE_FLEX_MESSAGE:
     case RTMP_PACKET_TYPE_INVOKE:
         return handle_invoke(r, pkt);
