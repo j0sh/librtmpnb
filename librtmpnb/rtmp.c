@@ -1554,6 +1554,7 @@ method_unknown:
     v.sb_start = p;
     v.sb_size = sz;
     v.sb_start[v.sb_size] = last;
+    r->m_contentLength = cl;
     RTMPSockBuf_Flush(r, &v);
     return RTMP_NB_OK;
 verb_unknown:
@@ -1661,6 +1662,7 @@ ReadN2(RTMP *r, RTMPSockBufView *v, char *buffer, int n)
         r->m_decrypted += n;
     }
 #endif
+    r->m_contentRead += n; // relevant for HTTP only
 
     return n;
 }
@@ -3756,6 +3758,7 @@ RTMP_ReadPacket(RTMP *r, RTMPPacket *packet)
     RTMP_Log(RTMP_LOGDEBUG2, "%s: fd=%d", __FUNCTION__, r->m_sb.sb_socket);
 
     RTMPSockBuf_SetView(&r->m_sb, &sbv);
+    r->m_contentRead = 0; // relevant for HTTP only
 
     if ((ret = ReadN2(r, &sbv, (char *)hbuf, 1)) != 1) {
         if (RTMP_NB_ERROR == ret) {
@@ -3933,6 +3936,7 @@ RTMP_ReadPacket(RTMP *r, RTMPPacket *packet)
         packet->m_body = NULL;	/* so it won't be erased on free */
     }
 
+    r->m_contentLength -= r->m_contentRead; // relevant for HTTP only
     if (RTMP_NB_OK != (ret = RTMPSockBuf_Flush(r, &sbv))) return ret;
     if (!RTMPPacket_IsReady(packet)) return RTMP_NB_CHUNK;
     return RTMP_NB_OK;

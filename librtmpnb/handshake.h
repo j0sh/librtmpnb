@@ -1092,6 +1092,7 @@ static int SHandShake1(RTMP *r) {
     RTMPSockBufView sbv;
 
     RTMPSockBuf_SetView(&r->m_sb, &sbv);
+    r->m_contentRead = 0; // relevant for HTTP only
 
     if ((ret = ReadN2(r, &sbv, (char *)&type, 1)) != 1) /* 0x03 or 0x06 */
         return ret;
@@ -1322,6 +1323,7 @@ static int SHandShake1(RTMP *r) {
         return RTMP_NB_ERROR;
 
     r->m_HSContext.state = HANDSHAKE_2;
+    r->m_contentLength -= r->m_contentRead; // relevant for HTTP only
     if (RTMP_NB_OK != (ret = RTMPSockBuf_Flush(r, &sbv))) return ret;
     return RTMP_NB_OK;
 }
@@ -1340,6 +1342,7 @@ static int SHandShake2(RTMP *r)
     RTMPSockBufView sbv;
 
     RTMPSockBuf_SetView(&r->m_sb, &sbv);
+    r->m_contentRead = 0; // relevant for HTTP only
 
     /* 2nd part of handshake */
     if ((ret = ReadN2(r, &sbv, (char *)clientsig, RTMP_SIG_SIZE)) !=
@@ -1418,6 +1421,7 @@ static int SHandShake2(RTMP *r)
 
     RTMP_Log(RTMP_LOGDEBUG, "%s: Handshaking finished....", __FUNCTION__);
     r->m_HSContext.state = CONNECTED;
+    r->m_contentLength -= r->m_contentRead; // relevant for HTTP only
     if (RTMP_NB_OK != (ret = RTMPSockBuf_Flush(r, &sbv))) return ret;
     return RTMP_NB_OK;
 }

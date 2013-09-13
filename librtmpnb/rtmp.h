@@ -298,6 +298,8 @@ extern "C"
         int m_resplen;
         int m_unackd;
         int m_pollInterval;
+        int m_contentLength;
+        int m_contentRead;
 
         int m_decrypted;
         uint8_t hbuf[RTMP_MAX_HEADER_SIZE];
