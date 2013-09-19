@@ -353,7 +353,7 @@ RTMP_Init(RTMP *r)
     r->m_fVideoCodecs = 252.0;
     r->Link.timeout = 30;
     r->Link.swfAge = 30;
-    r->m_pollInterval = 1;
+    r->m_pollInterval = -1;
     r->m_HSContext.state = HANDSHAKE_1;
     if (r->wb.wb_buf) free(r->wb.wb_buf);
     r->wb.wb_buf =  NULL;
@@ -1390,20 +1390,34 @@ static int HTTP_ResponseHeader(RTMP* r, char *hbuf, int cl)
         "Content-Length: %d\r\n\r\n",
         cl + !!prefix);                     // assumes prefix <= 0xf
     if (prefix) hbuf[hlen++] = prefix;
+    if (-1 == prefix) {
+        RTMP_Log(RTMP_LOGWARNING, "%s Poll interval not set!"
+                 " Is this part of an expected response??",
+                 __FUNCTION__);
+    }
     return hlen;
+}
+
+static char *RTMPT_HeaderBody(RTMP *r, int sz, int *hsz)
+{
+    char *hdr;
+    RTMPWriteBuf *wb = &r->http.wb;
+    hdr = AllocateWB(wb, sz + RTMP_HTTP_HEADER_SIZE);
+    if (!hdr) return hdr;
+    *hsz = HTTP_ResponseHeader(r, hdr, sz);
+    wb->wb_used -= (RTMP_HTTP_HEADER_SIZE - *hsz);
+    return hdr;
 }
 
 int HTTP_respond(RTMP  *r, const char *content, int cl, uint8_t prefix)
 {
     // TODO check RTMPTE
     char *c;
-    int old = r->m_pollInterval;
-    if (!prefix) r->m_pollInterval = 0;
+    r->m_pollInterval = prefix;
     c = RTMP_PacketBody(r, cl);
     if (!c) return RTMP_NB_ERROR;
     memcpy(c, content, cl);
     WriteN2(r, c, cl);
-    if (!prefix) r->m_pollInterval = old;
     return RTMP_NB_OK;
 }
 
@@ -1520,6 +1534,7 @@ int HTTP_SRead(RTMP *r, AVal *cid)
         RTMP_Log(RTMP_LOGINFO, "%s Got send", __FUNCTION__);
         GETCLIENTID
         skipbody = 0;
+        r->m_pollInterval = 1;
         break;
     default:
 method_unknown:
@@ -1570,6 +1585,96 @@ verb_unknown:
 reset_eagain:
     v.sb_start[v.sb_size] = last;
     return RTMP_NB_EAGAIN;
+}
+
+static int RTMPT_SWrite(RTMP *r)
+{
+    struct iovec iov[2]; // XXX portable ?!?
+    struct RTMPTMsg *m;
+    char *cur, *http_cur;
+    int ret, res = 0;
+    if (!(r->Link.protocol & RTMP_FEATURE_SHTTP)) {
+        RTMP_Log(RTMP_LOGERROR, "%s Connection not RTMPT",
+                 __FUNCTION__);
+        return RTMP_NB_ERROR;
+    }
+    cur = r->wb.wb_buf + r->wb.wb_used;
+    http_cur = r->http.wb_start + r->http.wb_used;
+    // first check if we need to build a new response
+    if (r->wb.wb_action && -1 != r->m_pollInterval) {
+        r->http.wb_start = r->wb.wb_buf;
+        // check for wraparound of the write buffer
+        if (2 == r->wb.wb_action) r->http.wb_used = 0;
+        http_cur = r->http.wb_start + r->http.wb_used;
+        r->wb.wb_action = 0;
+
+        // get current msg, get current buf, make headers, set fields
+        // XXX reset write queue pointers after reallocs!!!
+        int sz = cur - http_cur, hsz;
+        char *hdr = RTMPT_HeaderBody(r, sz, &hsz);
+        if (!hdr) return RTMP_NB_ERROR;
+        m = &r->http.wq[r->http.wq_w];
+        m->hdr = hdr;
+        m->hdr_size = hsz;
+        m->body = http_cur;
+        m->body_size = sz;
+        r->http.wb_used += sz;
+        r->http.wq_w = (r->http.wq_w + 1) % WQSZ;
+        r->m_pollInterval = -1;
+    }
+
+http_tryagain:
+    m = &r->http.wq[r->http.wq_r];
+    if (!m->hdr_size && !m->body_size) return res;
+
+    // prob should do some sanity checks, body+body_size < wb_end, &c
+    iov[0].iov_len = m->hdr_size;
+    iov[0].iov_base = m->hdr;
+    iov[1].iov_len = m->body_size;
+    iov[1].iov_base = m->body;
+
+    // TODO tls ?!?! see RTMPSockBuf_Send
+    ret = writev(r->m_sb.sb_socket, iov, 2);
+    if (ret < 0) {
+        int sockerr = GetSockError();
+        if (sockerr == EINTR && !RTMP_ctrlC) goto http_tryagain;
+        if (EAGAIN == sockerr || EWOULDBLOCK == sockerr)
+            return RTMP_NB_EAGAIN;
+
+        RTMP_Log(RTMP_LOGERROR, "%s, RTMP send error %d (%d bytes)",
+                 __FUNCTION__, sockerr, ret);
+        return RTMP_NB_ERROR;
+    }
+    res += ret;
+    if (ret > m->hdr_size) {
+        ret -= m->hdr_size;
+        r->http.wb.wb_written += m->hdr_size;
+        m->hdr_size = 0;
+        m->hdr = NULL;
+    } else {
+        m->hdr_size -= ret;
+        m->hdr += ret;
+        r->http.wb.wb_written += ret;
+        return res;
+    }
+    m->body_size -= ret;
+    if (m->body_size < 0) {
+        // should never happen?
+        RTMP_Log(RTMP_LOGERROR, "%s Wrote more than specified?!?!",
+                 __FUNCTION__);
+        return RTMP_NB_ERROR;
+    }
+    r->wb.wb_written += ret;
+    r->wb.wb_ready = !!(r->wb.wb_used - r->wb.wb_written);
+    if (m->body_size) {
+        // we have leftovers; didn't complete transmission
+        m->body += ret;
+        return res;
+    }
+    // completed this message, so let's try sending the next one too
+    m->body = NULL;
+    r->http.wq_r = (r->http.wq_r + 1) % WQSZ;
+    goto http_tryagain;
 }
 
 static int HTTP_read2(RTMP *r, RTMPSockBufView *v)
@@ -5262,8 +5367,10 @@ RTMP_Write(RTMP *r, const char *buf, int size)
 static inline char* AllocateWB(RTMPWriteBuf *wb, int size)
 {
     char *body;
+    if (wb->wb_action < 1) wb->wb_action = 1;
     if (wb->wb_written == wb->wb_used) {
         wb->wb_written = wb->wb_used = 0;
+        if (wb->wb_action < 2) wb->wb_action = 2;
     }
 
     if (wb->wb_used + size <= wb->wb_sz) goto pb_finish;
@@ -5293,6 +5400,9 @@ int RTMP_WriteQueued(RTMP *r)
     int n, total = 0, sz;
     char *buf;
 
+    if (r->Link.protocol & RTMP_FEATURE_SHTTP) {
+        return RTMPT_SWrite(r);
+    }
 tryagain:
     sz = r->wb.wb_used - r->wb.wb_written;
     buf = r->wb.wb_buf + r->wb.wb_written;

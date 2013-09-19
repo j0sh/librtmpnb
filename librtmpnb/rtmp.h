@@ -155,8 +155,22 @@ extern "C"
         int wb_written;
         int wb_used;
         int wb_ready;
+        int wb_action;
         char *wb_buf;
     } RTMPWriteBuf;
+
+    typedef struct RTMPTMsg {
+            int hdr_size, body_size;
+            char *hdr, *body;
+    } RTMPTMsg;
+
+    typedef struct RTMPTContext {
+        int wq_r, wq_w, wb_used;
+        char *wb_start;  // position in the regular RTMP writebuffer
+#define WQSZ 64
+        RTMPWriteBuf wb;
+        struct RTMPTMsg wq[WQSZ];
+    } RTMPTContext;
 
     void RTMPPacket_Reset(RTMPPacket *p);
     void RTMPPacket_Dump(RTMPPacket *p);
@@ -298,7 +312,7 @@ extern "C"
         int m_polling;
         int m_resplen;
         int m_unackd;
-        int m_pollInterval;
+        int m_pollInterval;     // also a http-validity sentinel
         int m_contentLength;
         int m_contentRead;
 
@@ -311,6 +325,7 @@ extern "C"
         RTMPSockBuf m_sb;
         RTMP_LNK Link;
         RTMP_HSContext m_HSContext;
+        RTMPTContext http;
         RTMPWriteBuf wb;
     } RTMP;
 
