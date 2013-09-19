@@ -118,6 +118,7 @@ extern "C"
         int type, fp9, encrypted, digestPosServer;
         void* keyIn, *keyOut;
         uint8_t serverbuf[RTMP_SIG_SIZE + 4];
+        uint8_t *writebuf;
     } RTMP_HSContext;
 
     typedef struct RTMPChunk {

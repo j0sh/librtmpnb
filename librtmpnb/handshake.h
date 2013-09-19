@@ -1082,7 +1082,11 @@ static int SHandShake1(RTMP *r) {
     int encrypted;
     int32_t *ip;
 
-    uint8_t *writebuf = (uint8_t*)RTMP_PacketBody(r, 2 * RTMP_SIG_SIZE + 1);
+    // sometimes, we can't read the entire handshake at once
+    // so don't reallocate the packetbody if needed
+    uint8_t *writebuf = r->m_HSContext.writebuf ?
+        r->m_HSContext.writebuf :
+        (uint8_t*)RTMP_PacketBody(r, 2 * RTMP_SIG_SIZE + 1);
     uint8_t *clientsig = writebuf + RTMP_SIG_SIZE + 1;
     uint8_t *serverbuf = r->m_HSContext.serverbuf;
     uint8_t *serversig = serverbuf + 4;
@@ -1093,6 +1097,7 @@ static int SHandShake1(RTMP *r) {
 
     RTMPSockBuf_SetView(&r->m_sb, &sbv);
     r->m_contentRead = 0; // relevant for HTTP only
+    r->m_HSContext.writebuf = writebuf;
 
     if ((ret = ReadN2(r, &sbv, (char *)&type, 1)) != 1) /* 0x03 or 0x06 */
         return ret;
@@ -1322,6 +1327,7 @@ static int SHandShake1(RTMP *r) {
     if (!WriteN2(r, (char *)writebuf, 2 * RTMP_SIG_SIZE + 1))
         return RTMP_NB_ERROR;
 
+    r->m_HSContext.writebuf = NULL;
     r->m_HSContext.state = HANDSHAKE_2;
     r->m_contentLength -= r->m_contentRead; // relevant for HTTP only
     if (RTMP_NB_OK != (ret = RTMPSockBuf_Flush(r, &sbv))) return ret;
