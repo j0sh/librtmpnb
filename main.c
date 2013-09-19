@@ -34,6 +34,7 @@ typedef struct client {
 static Client clients[MAXC];
 
 static RTMP contexts[MAXC];
+static RTMP *http_contexts[MAXC];
 static RTMP *active_contexts[MAXC];
 
 #define RTMPIDX(r) ((r) - &contexts[0])
@@ -68,6 +69,7 @@ static int setup_listen(int port)
         closesocket(sockfd);
         return -1;
     }
+    printf("Listening on port %d\n", port);
     return sockfd;
 }
 
@@ -753,9 +755,19 @@ static int setup_client(int *socks, int fd, int is_http)
 
     fcntl(fd, F_SETFL, sockflags | O_NONBLOCK);
     socks[i] = fd;
+    if (is_http) {
+        r = RTMP_Alloc();
+        if (!r) {
+            RTMP_Log(RTMP_LOGERROR, "Couldn't alloc RTMP context!\n");
+            exit(1);
+        }
+        http_contexts[i] = r;
+    } else r = &contexts[i];
+
     r = &contexts[i];
     RTMP_Init(r);
     r->m_sb.sb_socket = fd;
+    if (is_http) r->Link.protocol = RTMP_FEATURE_SHTTP;
     active_contexts[i] = r;
     clients[i].rtmp = r;
 
@@ -776,7 +788,12 @@ static int cleanup_client(int *socks, int i)
     RTMP *r = active_contexts[i];
     Client *c = &clients[i];
     printf("closing connection at index %d sockfd %d\n", i, socks[i]);
-    RTMP_Close(r);
+    if (!(r->Link.protocol & RTMP_FEATURE_SHTTP)) RTMP_Close(r);
+    else {
+        // for http, only close the socket but keep other state intact
+        RTMPSockBuf_Close(&r->m_sb);
+        r->m_sb.sb_socket = -1;
+    }
     socks[i] = -1;
     for (i = 0; i < MAXC; i++) {
         if (socks[i] > smax) smax = socks[i];
@@ -802,6 +819,39 @@ static int cleanup_client(int *socks, int i)
     return smax;
 }
 
+static int unwrap_http(RTMP **rtmp)
+{
+    int ret, i;
+    AVal clientid;
+    RTMP *r = *rtmp;
+    if (r->m_contentLength) return RTMP_NB_OK; // have unread content
+    if (RTMP_NB_OK != (ret = HTTP_SRead(r, &clientid))) return ret;
+    if (AVMATCH(&clientid, &r->m_clientID)) {
+        printf("thinger is already matched; do nothing\n");
+        return RTMP_NB_EAGAIN;
+    } else if (!clientid.av_val && r->m_clientID.av_val) {
+        printf("OPEN message ??\n");
+        return RTMP_NB_EAGAIN;
+    } else if (!r->m_clientID.av_val && clientid.av_val) {
+        // not ideal but Good Enough here
+        printf("Searching for an existing clientid!\n");
+        for (i = 0; i < MAXC; i++) {
+            if (!http_contexts[i]) continue;
+            if (AVMATCH(&clientid, &http_contexts[i]->m_clientID)) {
+                // transplant the fd and buffer
+                if (http_contexts[i]->m_sb.sb_socket ==
+                    r->m_sb.sb_socket) break;
+                memcpy(&http_contexts[i]->m_sb, &r->m_sb,
+                       sizeof(RTMPSockBuf));
+                break;
+            }
+        }
+        if (i == MAXC) printf("Matching RTMP context not found!\n");
+    }
+    // return OK if we have leftovers for actual RTMP packets
+    return r->m_sb.sb_size ? RTMP_NB_OK : RTMP_NB_EAGAIN;
+}
+
 static int serve_client(RTMP *r)
 {
     RTMPPacket pkt;
@@ -810,6 +860,8 @@ static int serve_client(RTMP *r)
         return RTMP_NB_ERROR;
     memset(&pkt, 0, sizeof(RTMPPacket));
 srv_loop:
+    if (r->Link.protocol & RTMP_FEATURE_SHTTP &&
+        RTMP_NB_OK != (ret = unwrap_http(&r))) return ret;
     ret = RTMP_ServeNB(r, &pkt);
     switch(ret) {
     case RTMP_NB_ERROR:
@@ -829,6 +881,7 @@ int main()
 {
     memset(streams, 0, sizeof(streams));
     memset(&contexts, 0, sizeof(contexts));
+    memset(http_contexts, 0, sizeof(http_contexts));
     memset(active_contexts, 0, sizeof(active_contexts));
     int rtmpfd = setup_listen(1935);
     int httpfd = setup_listen(8080);
@@ -866,7 +919,7 @@ while (1) {
         if (sockfd <= 0 && EAGAIN != errno) {
             fprintf(stderr, "%s: accept failed", __FUNCTION__);
         } else if (sockfd >= 0) {
-            ret = setup_client(socks, sockfd);
+            ret = setup_client(socks, sockfd, lfd == httpfd);
             if (ret < 0) continue;
             nb_socks++;
             smax = sockfd > smax ? sockfd : smax;
