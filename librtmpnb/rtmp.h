@@ -398,7 +398,6 @@ extern "C"
     void RTMP_DropRequest(RTMP *r, int i, int freeit);
     int RTMP_Read(RTMP *r, char *buf, int size);
     int RTMP_Write(RTMP *r, const char *buf, int size);
-    char* RTMP_PacketBody(RTMP *r, int size);
     int RTMP_WriteQueued(RTMP *r);
 
     int HTTP_SRead(RTMP *r, AVal *clientid);

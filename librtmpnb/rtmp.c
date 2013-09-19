@@ -117,6 +117,8 @@ typedef struct RTMPSockBufView {
 
 static int ReadN2(RTMP *r, RTMPSockBufView *v, char *buffer, int n);
 static int WriteN2(RTMP *r, const char *buffer, int n);
+static char *AllocateWB(RTMPWriteBuf *wb, int size);
+static char* RTMP_PacketBody(RTMP *r, int size);
 static int RTMPSockBuf_Flush(RTMP *r, RTMPSockBufView *v);
 static void RTMPSockBuf_SetView(RTMPSockBuf *sb, RTMPSockBufView *v);
 
@@ -1373,6 +1375,11 @@ RTMP_ClientPacket(RTMP *r, RTMPPacket *packet)
 extern FILE *netstackdump;
 extern FILE *netstackdump_read;
 #endif
+
+static char* RTMP_PacketBody(RTMP *r, int size)
+{
+    return AllocateWB(&r->wb, size);
+}
 
 #define RTMP_HTTP_HEADER_SIZE 512
 static int HTTP_ResponseHeader(RTMP* r, char *hbuf, int cl)
@@ -5252,41 +5259,33 @@ RTMP_Write(RTMP *r, const char *buf, int size)
     return size+s2;
 }
 
-char* RTMP_PacketBody(RTMP *r, int size)
+static inline char* AllocateWB(RTMPWriteBuf *wb, int size)
 {
-    int hsz = 0, realsz;
     char *body;
-    if (r->Link.protocol & RTMP_PROTOCOL_RTMPT)
-        hsz += RTMP_HTTP_HEADER_SIZE;
-    realsz = size + hsz;
-    if (r->wb.wb_written == r->wb.wb_used) {
-        r->wb.wb_written = r->wb.wb_used = 0;
+    if (wb->wb_written == wb->wb_used) {
+        wb->wb_written = wb->wb_used = 0;
     }
 
-    if (r->wb.wb_used + realsz <= r->wb.wb_sz) goto pb_finish;
+    if (wb->wb_used + size <= wb->wb_sz) goto pb_finish;
 
     // enlarge write buffer
-    r->wb.wb_sz += realsz > RTMP_BUFFER_CACHE_SIZE ?
-        realsz : RTMP_BUFFER_CACHE_SIZE;
-    if (r->wb.wb_sz > RTMP_MAX_ELEM_SIZE || r->wb.wb_sz < 0) {
+    wb->wb_sz += size > RTMP_BUFFER_CACHE_SIZE ?
+        size : RTMP_BUFFER_CACHE_SIZE;
+    if (wb->wb_sz > RTMP_MAX_ELEM_SIZE || wb->wb_sz < 0) {
         RTMP_Log(RTMP_LOGWARNING, "%s Packet size %d invalid",
-                 __FUNCTION__, r->wb.wb_sz);
+                 __FUNCTION__, wb->wb_sz);
         return NULL;
     }
-    r->wb.wb_buf = realloc(r->wb.wb_buf, r->wb.wb_sz);
-    if (!r->wb.wb_buf) {
-        RTMP_Log(RTMP_LOGERROR, "Unable to realloc packet body!");
+    wb->wb_buf = realloc(wb->wb_buf, wb->wb_sz);
+    if (!wb->wb_buf) {
+        RTMP_Log(RTMP_LOGERROR, "Unable to realloc write buffer!");
         exit(1);
     }
 
 pb_finish:
-    body = r->wb.wb_buf + r->wb.wb_used;
-    r->wb.wb_used += realsz;
-    if (r->Link.protocol & RTMP_FEATURE_SHTTP) {
-        hsz = HTTP_ResponseHeader(r, body, size);
-        r->wb.wb_used -= (RTMP_HTTP_HEADER_SIZE - hsz);
-    }
-    return body + hsz;
+    body = wb->wb_buf + wb->wb_used;
+    wb->wb_used += size;
+    return body;
 }
 
 int RTMP_WriteQueued(RTMP *r)
