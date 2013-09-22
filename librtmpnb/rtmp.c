@@ -4209,7 +4209,7 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
     uint32_t last = 0;
     int nSize;
     int hSize, cSize;
-    char *header, *hptr, *hend, hbuf[RTMP_MAX_HEADER_SIZE], c;
+    char *header, *hptr, *hend, c;
     uint32_t t;
     char *buffer, *tbuf = NULL, *toff = NULL;
     int nChunkSize;
@@ -4279,9 +4279,7 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
     else tlen = nSize + hSize;
     tbuf = RTMP_PacketBody(r, tlen);
     if (!tbuf) return RTMP_NB_ERROR;
-    toff = tbuf;
-    if (packet->m_body) header = toff;
-    else header = hbuf + sizeof(hbuf) - hSize;
+    header = toff = tbuf;
     hend = header + hSize;
 
     hptr = header;
