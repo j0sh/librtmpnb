@@ -190,7 +190,7 @@ static int send_onstatus(RTMP *r, double txn, int streamid, int chan,
     AVal av;
 
     packet.m_nChannel = chan;
-    packet.m_headerType = 1; /* RTMP_PACKET_SIZE_MEDIUM; */
+    packet.m_headerType = 0; /* RTMP_PACKET_SIZE_LARGE; */
     packet.m_packetType = RTMP_PACKET_TYPE_INVOKE;
     packet.m_nTimeStamp = 0;
     packet.m_nInfoField2 = streamid;
