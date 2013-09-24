@@ -342,11 +342,11 @@ static int send_media(RTMP *r, RTMPPacket *inpkt)
     if (!RTMP_IsConnected(r)) return RTMP_NB_ERROR;
     memset(&packet, 0, sizeof(RTMPPacket));
     packet.m_nChannel = chan(r->m_stream_id, inpkt->m_packetType);
-    packet.m_headerType = 1;
     packet.m_packetType = inpkt->m_packetType;
     packet.m_nTimeStamp = inpkt->m_nTimeStamp;
     packet.m_nBodySize = inpkt->m_nBodySize;
     packet.m_body = inpkt->m_body;
+    packet.m_nInfoField2 = r->m_stream_id;
     return RTMP_SendPacket(r, &packet, FALSE);
 }
 
@@ -390,6 +390,8 @@ static int send_streaminfo(RTMP *r, Stream *st)
 {
     int err;
     RTMPPacket packet = {0};
+    packet.m_headerType = 0; // this should only be sent at the
+    packet.m_nTimeStamp = 0; // beginning of a stream
     packet.m_nInfoField2 = r->m_stream_id;
     if (st->metadata_sz) {
         packet.m_nChannel = audio_channel(r->m_stream_id);

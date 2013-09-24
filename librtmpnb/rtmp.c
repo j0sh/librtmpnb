@@ -2730,12 +2730,12 @@ RTMP_SendCtrl(RTMP *r, short nType, unsigned int nObject, unsigned int nTime)
     RTMP_Log(RTMP_LOGDEBUG, "sending ctrl. type: 0x%04x", (unsigned short)nType);
 
     packet.m_nChannel = 0x02;	/* control channel (ping) */
-    packet.m_headerType = RTMP_PACKET_SIZE_MEDIUM;
+    packet.m_headerType = 0;//RTMP_PACKET_SIZE_MEDIUM;
     packet.m_packetType = RTMP_PACKET_TYPE_CONTROL;
     packet.m_nTimeStamp = 0;	/* RTMP_GetTime(); */
     packet.m_nInfoField2 = 0;
     packet.m_hasAbsTimestamp = 0;
-    packet.m_body = pbuf + RTMP_MAX_HEADER_SIZE;
+    packet.m_body = pbuf;
 
     switch(nType) {
     case 0x03:
