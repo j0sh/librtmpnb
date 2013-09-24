@@ -246,6 +246,16 @@ static int send_play_reset(RTMP *r, AMFObject *obj, RTMPPacket *pkt,
                          "NetStream.Play.Reset", desc);
 }
 
+static int send_play_stop(RTMP *r, char *sname)
+{
+    char desc[128];
+    int sid = r->m_stream_id, chan = audio_channel(sid);
+    int size = snprintf(desc, sizeof(desc), "Stream %s has stopped ",
+                        sname);
+    return send_onstatus(r, 0, sid, chan, "status",
+                         "NetStream.Play.Stop", desc);
+}
+
 static int send_publish_error(RTMP *r, AMFObject *obj, RTMPPacket *pkt,
     char *desc)
 {
@@ -499,6 +509,26 @@ static int process_publish(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
     return send_publish_start(r, obj, pkt, streams[i].name.av_val);
 }
 
+void cleanup_stream(Stream *s)
+{
+    int i, count = 0;
+    AVal *name = &s->name;
+    RTMP *r;
+    for (i = 0; i < MAXC; i++) {
+        if (!s->consumers[i]) continue;
+        r = s->consumers[i];
+        RTMP_SendCtrl(r, 1, r->m_stream_id, 0);
+        send_play_stop(r, name->av_val);
+        count++;
+    }
+    s->producer = NULL;
+    if (!count) free_aval(name);
+    if (s->metadata) free(s->metadata);
+    if (s->avc_seq) free(s->avc_seq);
+    s->metadata = s->avc_seq = NULL;
+    s->metadata_sz = s->avc_seq_sz = s->aac_seq_sz = 0;
+}
+
 static int process_close(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
 {
     int i;
@@ -513,13 +543,7 @@ static int process_close(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
     }
     RTMP_Log(RTMP_LOGINFO, "%s Closing %s",
              __FUNCTION__, streams[i].name.av_val);
-    free_aval(&streams[i].name);
-    streams[i].producer = NULL;
-    if (streams[i].metadata) free(streams[i].metadata);
-    if (streams[i].avc_seq) free(streams[i].avc_seq);
-    streams[i].metadata = streams[i].avc_seq = NULL;
-    streams[i].metadata_sz = 0;
-    streams[i].avc_seq_sz = streams[i].aac_seq_sz = 0;
+    cleanup_stream(&streams[i]);
     return RTMP_NB_OK;
 }
 
@@ -794,9 +818,9 @@ static int cleanup_client(int *socks, int i)
         RTMPSockBuf_Close(&r->m_sb);
         r->m_sb.sb_socket = -1;
     }
-    socks[i] = -1;
-    for (i = 0; i < MAXC; i++) {
-        if (socks[i] > smax) smax = socks[i];
+    socks[j] = -1;
+    for (j = 0; j < MAXC; j++) {
+        if (socks[j] > smax) smax = socks[j];
     }
     // clear any streams
     if (!c || r != c->rtmp) {
@@ -806,14 +830,14 @@ static int cleanup_client(int *socks, int i)
     }
     for (j = 0; j < MAXS; j++) {
         int k;
-        Stream *s = c->outstreams[j];
+        Stream *s = c->instreams[j];
+        if (s) cleanup_stream(s);
+        s = c->outstreams[j];
         if (!s) continue;
-        for (k = 0; k < MAXC; k++) {
-            if (!s->consumers[k] || s->consumers[k] != r) continue;
-            s->consumers[k] = NULL;
-        }
+        if (s->consumers[i] == r) s->consumers[i] = NULL;
+        else RTMP_Log(RTMP_LOGWARNING, "%s Unset consumer in stream",
+                                        __FUNCTION__);
         c->outstreams[j] = NULL;
-        c->instreams[j] = NULL; // TODO clean up this one as well
     }
     c->rtmp = NULL;
     return smax;
