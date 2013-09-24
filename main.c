@@ -270,6 +270,20 @@ static int send_publish_start(RTMP *r, AMFObject *obj, RTMPPacket *pkt, char *sn
                          "Stream is now published");
 }
 
+static int send_chunksize(RTMP *r, int size)
+{
+    RTMPPacket packet = {0};
+    char pbuf[4], *pend = pbuf + sizeof(pbuf);
+    packet.m_nChannel = 0x02;
+    packet.m_headerType = 1;
+    packet.m_packetType = 0x01;
+    packet.m_body = pbuf;
+    packet.m_nBodySize = 4;
+    AMF_EncodeInt32(pbuf, pend, size);
+    r->m_outChunkSize = size;
+    return RTMP_SendPacket(r, &packet, FALSE);
+}
+
 static int send_cxn_resp(RTMP *r, double txn)
 {
   RTMPPacket packet;
@@ -323,6 +337,7 @@ static int send_cxn_resp(RTMP *r, double txn)
 
   packet.m_nBodySize = enc - packet.m_body;
 
+  if (RTMP_NB_OK != send_chunksize(r, 1400)) return RTMP_NB_ERROR;
   return RTMP_SendPacket(r, &packet, FALSE);
 
 }
