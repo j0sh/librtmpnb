@@ -491,7 +491,7 @@ static int process_play(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
 
 static int process_publish(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
 {
-    int i, empty = -1;
+    int i, empty = -1, idx;
     Stream *st;
     AVal name;
     AMFProp_GetString(AMF_GetProp(obj, NULL, 3), &name);
@@ -518,6 +518,7 @@ static int process_publish(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
         return RTMP_NB_OK;
     } else if (i == MAXS && empty >= 0) i = empty;
 
+    clients[RTMPIDX(r)].instreams[i] = &streams[i];
     streams[i].producer = r;
     streams[i].id = pkt->m_nInfoField2;
     copy_aval(&name, &streams[i].name);
