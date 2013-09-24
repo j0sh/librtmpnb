@@ -4399,6 +4399,9 @@ RTMP_Close(RTMP *r)
     int i;
 
     if (RTMP_IsConnected(r)) {
+        // TODO A flag for server cxns, rather than client cxns
+        // DeleteStream/FCUnPublish/etc are only for clients
+        /*
         if (r->m_stream_id > 0) {
             i = r->m_stream_id;
             r->m_stream_id = 0;
@@ -4406,6 +4409,7 @@ RTMP_Close(RTMP *r)
                 SendFCUnpublish(r);
             SendDeleteStream(r, i);
         }
+        */
         if (r->m_clientID.av_val) {
             if (r->Link.protocol & RTMP_FEATURE_HTTP)
                 HTTP_Post(r, RTMPT_CLOSE, "", 1);

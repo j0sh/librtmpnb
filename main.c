@@ -843,7 +843,7 @@ static int cleanup_client(int *socks, int i)
         RTMPSockBuf_Close(&r->m_sb);
         r->m_sb.sb_socket = -1;
     }
-    socks[j] = -1;
+    socks[i] = -1;
     for (j = 0; j < MAXC; j++) {
         if (socks[j] > smax) smax = socks[j];
     }
@@ -995,8 +995,7 @@ while (1) {
     return 0;
 cleanup:
     for (i = 0; i < MAXC; i++) {
-        RTMP_Close(active_contexts[i]);
-        if (-1 != socks[i]) close(socks[i]);
+        if (-1 != socks[i]) cleanup_client(socks, i);
     }
     printf("goodbye, sad world\n");
     return 0;
