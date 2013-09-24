@@ -435,7 +435,7 @@ static int send_playmsgs(RTMP *r, Stream *st, int reset)
 
 static int process_play(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
 {
-    int i, idx = RTMPIDX(r), reset = 0, err;
+    int i, idx = RTMPIDX(r), reset = 0, err, empty = -1, exists = 0;
     AVal name;
     Stream *st;
     Client *c;
@@ -449,15 +449,24 @@ static int process_play(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
         return RTMP_NB_ERROR;
     }
     for (i = 0; i < MAXS; i++) {
-        if (!streams[i].name.av_val) continue;
+        if (!streams[i].name.av_val) {
+            if (empty < 0) empty = i;
+            continue;
+        }
         if (AVMATCH(&name, &streams[i].name)) break;
     }
     if (i == MAXS) {
-        RTMP_Log(RTMP_LOGWARNING, "%s No stream found",
-                 __FUNCTION__);
-        // TODO create stream here and wait for it
-        return RTMP_NB_OK;
-    }
+        if (empty < 0) {
+            RTMP_Log(RTMP_LOGWARNING, "%s No stream found",
+                     __FUNCTION__);
+            return RTMP_NB_OK;
+        }
+        // create the stream
+        i = empty;
+        copy_aval(&name, &streams[i].name);
+        RTMP_Log(RTMP_LOGINFO, "%s No stream %s found; waiting",
+                               __FUNCTION__, streams[i].name.av_val);
+    } else exists = 1;
     // set consumer in stream
     st = &streams[i];
     st->consumers[idx] = r;
@@ -474,12 +483,14 @@ static int process_play(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
         return send_play_error(r, obj, pkt,
                                "Maximum number of streams reached");
     }
+    if (!exists) return RTMP_NB_OK;
     return send_playmsgs(r, st, reset);
 }
 
 static int process_publish(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
 {
-    int i;
+    int i, empty = -1;
+    Stream *st;
     AVal name;
     AMFProp_GetString(AMF_GetProp(obj, NULL, 3), &name);
     if (!name.av_len) {
@@ -489,25 +500,34 @@ static int process_publish(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
         return RTMP_NB_ERROR;
     }
     for (i = 0; i < MAXS; i++) {
-        if (!streams[i].name.av_val) break;
+        if (!streams[i].name.av_len && empty < 0) empty = i;
         if (!AVMATCH(&name, &streams[i].name)) continue;
+        if (!streams[i].producer) break;
         RTMP_Log(RTMP_LOGERROR, "%s Stream already exists",
                  __FUNCTION__);
         send_publish_error(r, obj, pkt, "Stream already exists");
         return RTMP_NB_ERROR;
     }
-    if (i == MAXS) {
+    if (i == MAXS && empty < 0) {
         RTMP_Log(RTMP_LOGERROR, "%s Ran out of publishing slots",
                  __FUNCTION__);
         send_publish_error(r, obj, pkt,
                            "No more publishing slots available");
         return RTMP_NB_OK;
-    }
+    } else if (i == MAXS && empty >= 0) i = empty;
+
     streams[i].producer = r;
     streams[i].id = pkt->m_nInfoField2;
     copy_aval(&name, &streams[i].name);
     RTMP_Log(RTMP_LOGINFO, "%s Publishing %s",
              __FUNCTION__, streams[i].name.av_val);
+    st = &streams[i];
+    for (i = 0; i < MAXC; i++) {
+        if (!st->consumers[i]) continue;
+        if (RTMP_NB_OK != send_playmsgs(st->consumers[i], st, 1)) {
+            // do something here! close cxn?
+        }
+    }
     return send_publish_start(r, obj, pkt, streams[i].name.av_val);
 }
 
