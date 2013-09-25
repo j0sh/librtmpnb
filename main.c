@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/fcntl.h>
+#include <sys/queue.h>
 
 #include "librtmpnb/rtmp_sys.h"
 #include "librtmpnb/log.h"
@@ -30,14 +31,18 @@ typedef struct client {
     RTMP *rtmp;
     Stream *instreams[MAXS];
     Stream *outstreams[MAXS];
+    LIST_ENTRY(client) next;
 } Client;
 static Client clients[MAXC];
+
+LIST_HEAD(Clients, client) clients_head;
 
 static RTMP contexts[MAXC];
 static RTMP *http_contexts[MAXC];
 static RTMP *active_contexts[MAXC];
 
 #define RTMPIDX(r) ((r) - &contexts[0])
+#define CLIENTIDX(c) ((c) - &clients[0])
 
 static int setup_listen(int port)
 {
@@ -827,6 +832,7 @@ static int setup_client(int *socks, int fd, int is_http)
         }
         http_contexts[i] = r;
     } else r = &contexts[i];
+    LIST_INSERT_HEAD(&clients_head, &clients[i], next);
 
     r = &contexts[i];
     RTMP_Init(r);
@@ -880,6 +886,7 @@ static int cleanup_client(int *socks, int i)
         c->outstreams[j] = NULL;
     }
     c->rtmp = NULL;
+    LIST_REMOVE(c, next);
     return smax;
 }
 
@@ -947,6 +954,7 @@ int main()
     memset(&contexts, 0, sizeof(contexts));
     memset(http_contexts, 0, sizeof(http_contexts));
     memset(active_contexts, 0, sizeof(active_contexts));
+    LIST_INIT(&clients_head);
     int rtmpfd = setup_listen(1935);
     int httpfd = setup_listen(8080);
     int socks[MAXC], nb_socks = 0, i, smax = httpfd, nb_listeners = 2;
@@ -963,13 +971,14 @@ while (1) {
     struct sockaddr_in addr;
     socklen_t addrlen = sizeof(struct sockaddr_in);
     int ret, sockfd;
+    Client *c;
 
     FD_ZERO(&rset);
     FD_ZERO(&wset);
-    for (i = 0; i < MAXC; i++) {
-        if (-1 == socks[i]) continue;
+    for (i = 0; i < nb_listeners; i++) FD_SET(socks[i], &rset);
+    LIST_FOREACH(c, &clients_head, next) {
+        i = CLIENTIDX(c);
         FD_SET(socks[i], &rset);
-        if (i < nb_listeners) continue;
         if (active_contexts[i]->wb.wb_ready) FD_SET(socks[i], &wset);
     }
     ret = select(smax + 1, &rset, &wset, NULL, &t);
@@ -991,14 +1000,16 @@ while (1) {
     }
 
     // check clients
-    for (i = nb_listeners; i < MAXC; i++) {
+    LIST_FOREACH(c, &clients_head, next) {
         int ret;
+        i = CLIENTIDX(c);
         if (-1 == socks[i] ||!FD_ISSET(socks[i], &rset)) continue;
         if (RTMP_NB_ERROR != serve_client(active_contexts[i])) continue;
         smax = cleanup_client(socks, i);
         nb_socks--;
     }
-    for (i = nb_listeners; i < MAXC; i++) {
+    LIST_FOREACH(c, &clients_head, next) {
+        i = CLIENTIDX(c);
         if (-1 == socks[i] || !FD_ISSET(socks[i], &wset)) continue;
         if (RTMP_NB_ERROR != RTMP_WriteQueued(active_contexts[i])) continue;
         smax = cleanup_client(socks, i);
