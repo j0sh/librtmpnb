@@ -13,6 +13,11 @@
 
 #define MAXC 100    /* max clients */
 #define MAXS MAXC   /* max streams */
+typedef struct subscriber {
+    struct client *c;
+    LIST_ENTRY(subscriber) next;
+} Subscriber;
+
 typedef struct stream {
     AVal name;
     int id;           // source id
@@ -23,7 +28,8 @@ typedef struct stream {
     uint8_t *avc_seq;
     uint8_t aac_seq[4];
     RTMP *producer;
-    RTMP *consumers[MAXC];
+    struct subscriber sub_storage[MAXS];
+    LIST_HEAD(Subscribers, subscriber) subscribers;
 } Stream;
 static Stream streams[MAXS];
 
@@ -460,6 +466,7 @@ static int process_play(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
     int i, idx = RTMPIDX(r), reset = 0, err, empty = -1, exists = 0;
     AVal name;
     Stream *st;
+    Subscriber *sub;
     Client *c;
     AMFProp_GetString(AMF_GetProp(obj, NULL, 3), &name);
     if (obj->o_num > 6)
@@ -491,8 +498,10 @@ static int process_play(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
     } else exists = 1;
     // set consumer in stream
     st = &streams[i];
-    st->consumers[idx] = r;
     c = &clients[idx];
+    sub = &st->sub_storage[idx];
+    sub->c = c;
+    LIST_INSERT_HEAD(&st->subscribers, sub, next);
     // set stream in client context
     for (i = 0; i < MAXS; i++) {
         if (c->outstreams[i]) continue;
@@ -514,6 +523,7 @@ static int process_publish(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
     int i, empty = -1, idx;
     Stream *st;
     AVal name;
+    Subscriber *sub;
     AMFProp_GetString(AMF_GetProp(obj, NULL, 3), &name);
     if (!name.av_len) {
         RTMP_Log(RTMP_LOGWARNING, "%s No stream name given",
@@ -545,9 +555,9 @@ static int process_publish(RTMP *r, AMFObject *obj, RTMPPacket *pkt)
     RTMP_Log(RTMP_LOGINFO, "%s Publishing %s",
              __FUNCTION__, streams[i].name.av_val);
     st = &streams[i];
-    for (i = 0; i < MAXC; i++) {
-        if (!st->consumers[i]) continue;
-        if (RTMP_NB_OK != send_playmsgs(st->consumers[i], st, 1)) {
+    LIST_FOREACH(sub, &st->subscribers, next) {
+        RTMP *cr = &contexts[CLIENTIDX(sub->c)];
+        if (RTMP_NB_OK != send_playmsgs(cr, st, 1)) {
             // do something here! close cxn?
         }
     }
@@ -559,9 +569,9 @@ void cleanup_stream(Stream *s)
     int i, count = 0;
     AVal *name = &s->name;
     RTMP *r;
-    for (i = 0; i < MAXC; i++) {
-        if (!s->consumers[i]) continue;
-        r = s->consumers[i];
+    Subscriber *sub;
+    LIST_FOREACH(sub, &s->subscribers, next) {
+        r = &contexts[CLIENTIDX(sub->c)];
         RTMP_SendCtrl(r, 1, r->m_stream_id, 0);
         send_play_stop(r, name->av_val);
         count++;
@@ -716,6 +726,7 @@ static int handle_media(RTMP *r, RTMPPacket *pkt)
 {
     int i, err, id = pkt->m_nInfoField2;
     Stream *st;
+    Subscriber *sub;
     for (i = 0; i < MAXS && id != streams[i].id; i++) ;
     if (i == MAXS) {
         RTMP_Log(RTMP_LOGERROR, "%s Stream %d not found!",
@@ -765,11 +776,9 @@ static int handle_media(RTMP *r, RTMPPacket *pkt)
         break;
     default: break;
     }
-    for (i = 0; i < MAXC; i++) {
-        if (!st->consumers[i]) continue;
-        if (RTMP_NB_OK != (err = send_media(st->consumers[i], pkt))) {
-            return err;
-        }
+    LIST_FOREACH(sub, &st->subscribers, next) {
+        RTMP *cr = &contexts[CLIENTIDX(sub->c)];
+        if (RTMP_NB_OK != (err = send_media(cr, pkt))) return err;
     }
     return RTMP_NB_OK;
 }
@@ -880,9 +889,7 @@ static int cleanup_client(int *socks, int i)
         if (s) cleanup_stream(s);
         s = c->outstreams[j];
         if (!s) continue;
-        if (s->consumers[i] == r) s->consumers[i] = NULL;
-        else RTMP_Log(RTMP_LOGWARNING, "%s Unset consumer in stream",
-                                        __FUNCTION__);
+        LIST_REMOVE(&s->sub_storage[i], next);
         c->outstreams[j] = NULL;
     }
     c->rtmp = NULL;
