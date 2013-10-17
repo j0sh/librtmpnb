@@ -164,12 +164,19 @@ extern "C"
             char *hdr, *body;
     } RTMPTMsg;
 
+    typedef enum {
+        RTMPT_FCS=-1, RTMPT_OPEN, RTMPT_SEND, RTMPT_IDLE, RTMPT_CLOSE
+    } RTMPTCmd;
+
     typedef struct RTMPTContext {
+        int content_length, poll_interval, cmd;
         int wq_r, wq_w, wb_used;
         char *wb_start;  // position in the regular RTMP writebuffer
 #define WQSZ 64
-        RTMPWriteBuf wb;
+        RTMPWriteBuf hdr, *body;
         struct RTMPTMsg wq[WQSZ];
+        char wbuf[128]; // small writebuf for prefixed bodies
+        char wbuf_used;
     } RTMPTContext;
 
     void RTMPPacket_Reset(RTMPPacket *p);
@@ -312,9 +319,6 @@ extern "C"
         int m_polling;
         int m_resplen;
         int m_unackd;
-        int m_pollInterval;     // also a http-validity sentinel
-        int m_contentLength;
-        int m_contentRead;
 
         int m_decrypted;
         uint8_t hbuf[RTMP_MAX_HEADER_SIZE];
@@ -415,7 +419,8 @@ extern "C"
     int RTMP_Write(RTMP *r, const char *buf, int size);
     int RTMP_WriteQueued(RTMP *r);
 
-    int HTTP_SRead(RTMP *r, AVal *clientid);
+    int rtmpt_read(RTMPSockBuf *sb, RTMPTContext *r, AVal *cid);
+    int rtmpt_write(RTMPTContext *r, RTMPSockBuf *sb);
 
     /* hashswf.c */
     int RTMP_HashSWF(const char *url, unsigned int *size, unsigned char *hash,

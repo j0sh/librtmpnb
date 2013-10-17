@@ -7,10 +7,6 @@
 #include "librtmpnb/rtmp_sys.h"
 #include "librtmpnb/log.h"
 
-#ifdef linux
-#include <linux/netfilter_ipv4.h>
-#endif
-
 #define MAXC 100    /* max clients */
 #define MAXS MAXC   /* max streams */
 typedef struct subscriber {
@@ -41,14 +37,23 @@ typedef struct client {
 } Client;
 static Client clients[MAXC];
 
+typedef struct http_client {
+    RTMPSockBuf sb;
+    RTMPTContext rtmpt;
+    LIST_ENTRY(http_client) next;
+} HTTPClient;
+static HTTPClient http_clients[MAXC];
+
 LIST_HEAD(Clients, client) clients_head;
+LIST_HEAD(RTMPTClients, client) rtmptclients_head;
+LIST_HEAD(HTTPClients, http_client) httpclients_head;
 
 static RTMP contexts[MAXC];
-static RTMP *http_contexts[MAXC];
-static RTMP *active_contexts[MAXC];
+static int httpflags[MAXC];
 
 #define RTMPIDX(r) ((r) - &contexts[0])
 #define CLIENTIDX(c) ((c) - &clients[0])
+#define HTTPIDX(c) ((c) - &http_clients[0])
 
 static int setup_listen(int port)
 {
@@ -778,7 +783,7 @@ static int handle_media(RTMP *r, RTMPPacket *pkt)
     }
     LIST_FOREACH(sub, &st->subscribers, next) {
         RTMP *cr = &contexts[CLIENTIDX(sub->c)];
-        if (RTMP_NB_OK != (err = send_media(cr, pkt))) return err;
+        if (RTMP_NB_OK != (err = send_media(cr, pkt))) ; // hmm
     }
     return RTMP_NB_OK;
 }
@@ -814,9 +819,28 @@ static int handle_packet(RTMP *r, RTMPPacket *pkt)
     return RTMP_NB_OK;
 }
 
+static int setup_http(int fd, int idx)
+{
+    memset(&http_clients[idx], 0, sizeof(HTTPClient));
+    LIST_INSERT_HEAD(&httpclients_head, &http_clients[idx], next);
+    http_clients[idx].sb.sb_socket = fd;
+    http_clients[idx].rtmpt.poll_interval = -1;
+    httpflags[idx] = 1;
+}
+
+static void setup_rtmp(int fd, int idx)
+{
+    RTMP *rtmp;
+    LIST_INSERT_HEAD(&clients_head, &clients[idx], next);
+    rtmp = &contexts[idx];
+    RTMP_Init(rtmp);
+    rtmp->m_sb.sb_socket = fd;
+    clients[idx].rtmp = rtmp;
+    httpflags[idx] = 0;
+}
+
 static int setup_client(int *socks, int fd, int is_http)
 {
-    RTMP *r;
     struct sockaddr_in dest;
     int i, sockflags = fcntl(fd, F_GETFL, 0);
     char ip[INET6_ADDRSTRLEN];
@@ -833,22 +857,9 @@ static int setup_client(int *socks, int fd, int is_http)
 
     fcntl(fd, F_SETFL, sockflags | O_NONBLOCK);
     socks[i] = fd;
-    if (is_http) {
-        r = RTMP_Alloc();
-        if (!r) {
-            RTMP_Log(RTMP_LOGERROR, "Couldn't alloc RTMP context!\n");
-            exit(1);
-        }
-        http_contexts[i] = r;
-    } else r = &contexts[i];
-    LIST_INSERT_HEAD(&clients_head, &clients[i], next);
 
-    r = &contexts[i];
-    RTMP_Init(r);
-    r->m_sb.sb_socket = fd;
-    if (is_http) r->Link.protocol = RTMP_FEATURE_SHTTP;
-    active_contexts[i] = r;
-    clients[i].rtmp = r;
+    if (is_http) setup_http(fd, i);
+    else setup_rtmp(fd, i);
 
     // ipv4 only for now
     if (!inet_ntop(dest.sin_family, &dest.sin_addr, ip, destlen)) {
@@ -864,18 +875,23 @@ static int setup_client(int *socks, int fd, int is_http)
 static int cleanup_client(int *socks, int i)
 {
     int smax = -1, j;
-    RTMP *r = active_contexts[i];
+    RTMP *r = &contexts[i];
     Client *c = &clients[i];
     printf("closing connection at index %d sockfd %d\n", i, socks[i]);
+    socks[i] = -1;
+    for (j = 0; j < MAXC; j++) {
+        if (socks[j] > smax) smax = socks[j];
+    }
+    if (httpflags[i]) {
+        LIST_REMOVE(&http_clients[i], next);
+        if (RTMPT_CLOSE != http_clients[i].rtmpt.cmd) return smax;
+        // else: find matching client here
+    }
     if (!(r->Link.protocol & RTMP_FEATURE_SHTTP)) RTMP_Close(r);
     else {
         // for http, only close the socket but keep other state intact
         RTMPSockBuf_Close(&r->m_sb);
         r->m_sb.sb_socket = -1;
-    }
-    socks[i] = -1;
-    for (j = 0; j < MAXC; j++) {
-        if (socks[j] > smax) smax = socks[j];
     }
     // clear any streams
     if (!c || r != c->rtmp) {
@@ -897,37 +913,32 @@ static int cleanup_client(int *socks, int i)
     return smax;
 }
 
-static int unwrap_http(RTMP **rtmp)
+static int create_context(HTTPClient *http, AVal *cid)
 {
-    int ret, i;
-    AVal clientid;
-    RTMP *r = *rtmp;
-    if (r->m_contentLength) return RTMP_NB_OK; // have unread content
-    if (RTMP_NB_OK != (ret = HTTP_SRead(r, &clientid))) return ret;
-    if (AVMATCH(&clientid, &r->m_clientID)) {
-        printf("thinger is already matched; do nothing\n");
-        return RTMP_NB_EAGAIN;
-    } else if (!clientid.av_val && r->m_clientID.av_val) {
-        printf("OPEN message ??\n");
-        return RTMP_NB_EAGAIN;
-    } else if (!r->m_clientID.av_val && clientid.av_val) {
-        // not ideal but Good Enough here
-        printf("Searching for an existing clientid!\n");
-        for (i = 0; i < MAXC; i++) {
-            if (!http_contexts[i]) continue;
-            if (AVMATCH(&clientid, &http_contexts[i]->m_clientID)) {
-                // transplant the fd and buffer
-                if (http_contexts[i]->m_sb.sb_socket ==
-                    r->m_sb.sb_socket) break;
-                memcpy(&http_contexts[i]->m_sb, &r->m_sb,
-                       sizeof(RTMPSockBuf));
-                break;
-            }
-        }
-        if (i == MAXC) printf("Matching RTMP context not found!\n");
+    Client *c;
+    int ret, idx = HTTPIDX(http);
+    if (http->rtmpt.cmd != RTMPT_OPEN) {
+        RTMP_Log(RTMP_LOGERROR, "%s Not allocating for a non-"
+                 "open message!", __FUNCTION__);
+        return RTMP_NB_ERROR;
     }
-    // return OK if we have leftovers for actual RTMP packets
-    return r->m_sb.sb_size ? RTMP_NB_OK : RTMP_NB_EAGAIN;
+    // here we assume a 1-1 mapping for TCP to RTMPT sessions
+    // in reality this is not always the case; sometimes the browser
+    // will reuse the same tcp cxn for multiple RTMPT sessions.
+    c = &clients[idx];
+    if (c->rtmp) {
+        // do a proper cleanup someday
+        LIST_REMOVE(c, next);
+    }
+    memset(c, 0, sizeof(Client));
+    c->rtmp = &contexts[idx];
+    RTMP_Init(c->rtmp);
+    LIST_INSERT_HEAD(&rtmptclients_head, c, next);
+    RTMP_Log(RTMP_LOGINFO, "%s Creating RTMP context",
+             __FUNCTION__);
+    copy_aval(cid, &c->rtmp->m_clientID);
+    http->rtmpt.body = &c->rtmp->wb;
+    return RTMP_NB_OK;
 }
 
 static int serve_client(RTMP *r)
@@ -938,8 +949,6 @@ static int serve_client(RTMP *r)
         return RTMP_NB_ERROR;
     memset(&pkt, 0, sizeof(RTMPPacket));
 srv_loop:
-    if (r->Link.protocol & RTMP_FEATURE_SHTTP &&
-        RTMP_NB_OK != (ret = unwrap_http(&r))) return ret;
     ret = RTMP_ServeNB(r, &pkt);
     switch(ret) {
     case RTMP_NB_ERROR:
@@ -955,12 +964,65 @@ srv_loop:
     return 1;
 }
 
+static int serve_http(HTTPClient *http)
+{
+    AVal cid = {NULL, 0};
+    Client *c = NULL;
+    int ret = RTMPSockBuf_Fill(&http->sb), len, rtmp_found = 0;
+    char *body;
+    if (RTMP_NB_ERROR == ret || http->sb.sb_size <= 0) {
+        return RTMP_NB_ERROR;
+    }
+    if (!http->rtmpt.content_length && // run if content buf is empty
+        RTMP_NB_OK != (ret = rtmpt_read(&http->sb, &http->rtmpt, &cid))) {
+        return ret;
+    }
+        // find or create context according to clientid
+        LIST_FOREACH(c, &rtmptclients_head, next) {
+            if (cid.av_len && AVMATCH(&cid, &c->rtmp->m_clientID)) {
+                rtmp_found = 1;
+                break;
+            } else if (!cid.av_len &&
+                        http->rtmpt.body == &c->rtmp->wb) {
+                rtmp_found = 1;
+                break;
+            }
+        }
+        if (!rtmp_found && RTMPT_OPEN == http->rtmpt.cmd) {
+            return create_context(http, &cid);
+        }
+
+    // check sb_size to accommodate incomplete transmission
+    len = http->sb.sb_size < http->rtmpt.content_length ?
+            http->sb.sb_size : http->rtmpt.content_length;
+    if (!len) return ret; // sometimes we receive HTTP header only
+    // copy http sockbuf to  rtmp sockbuf
+    if (!rtmp_found) {
+        RTMP_Log(RTMP_LOGERROR, "%s RTMP ctx not found",
+                 __FUNCTION__);
+        return RTMP_NB_ERROR;
+    }
+    c->rtmp->m_sb.sb_socket = http->sb.sb_socket;
+    c->rtmp->m_sb.sb_size = http->sb.sb_size;
+    c->rtmp->m_sb.sb_start = http->sb.sb_start;
+    c->rtmp->m_sb.sb_timedout = http->sb.sb_timedout;
+    c->rtmp->m_sb.sb_ssl = http->sb.sb_ssl;
+    c->rtmp->m_sb.sb_start = http->sb.sb_start;
+http_tryagain:
+    if (RTMP_NB_ERROR == serve_client(c->rtmp)) return RTMP_NB_ERROR;
+    len = http->sb.sb_size - c->rtmp->m_sb.sb_size;
+    http->rtmpt.content_length -= len;
+    http->sb.sb_size -= len;
+    http->sb.sb_start += len;
+    if (http->rtmpt.content_length) goto http_tryagain;
+    http->rtmpt.body = &c->rtmp->wb;
+    return RTMP_NB_OK;
+}
+
 int main()
 {
     memset(streams, 0, sizeof(streams));
     memset(&contexts, 0, sizeof(contexts));
-    memset(http_contexts, 0, sizeof(http_contexts));
-    memset(active_contexts, 0, sizeof(active_contexts));
     LIST_INIT(&clients_head);
     int rtmpfd = setup_listen(1935);
     int httpfd = setup_listen(8080);
@@ -979,6 +1041,7 @@ while (1) {
     socklen_t addrlen = sizeof(struct sockaddr_in);
     int ret, sockfd;
     Client *c;
+    HTTPClient *http;
 
     FD_ZERO(&rset);
     FD_ZERO(&wset);
@@ -986,7 +1049,14 @@ while (1) {
     LIST_FOREACH(c, &clients_head, next) {
         i = CLIENTIDX(c);
         FD_SET(socks[i], &rset);
-        if (active_contexts[i]->wb.wb_ready) FD_SET(socks[i], &wset);
+        if (contexts[i].wb.wb_ready) FD_SET(socks[i], &wset);
+    }
+    LIST_FOREACH(http, &httpclients_head, next) {
+        i = HTTPIDX(http);
+        FD_SET(socks[i], &rset);
+        if (http->rtmpt.poll_interval >= 0) {
+            FD_SET(socks[i], &wset);
+        }
     }
     ret = select(smax + 1, &rset, &wset, NULL, &t);
     if (-1 == ret) goto cleanup;
@@ -1008,17 +1078,32 @@ while (1) {
 
     // check clients
     LIST_FOREACH(c, &clients_head, next) {
-        int ret;
         i = CLIENTIDX(c);
         if (-1 == socks[i] ||!FD_ISSET(socks[i], &rset)) continue;
-        if (RTMP_NB_ERROR != serve_client(active_contexts[i])) continue;
+        if (RTMP_NB_ERROR != serve_client(&contexts[i])) continue;
+        smax = cleanup_client(socks, i);
+        nb_socks--;
+    }
+    // check http
+    LIST_FOREACH(http, &httpclients_head, next) {
+        int ret;
+        i = HTTPIDX(http);
+        if (-1 == socks[i] || !FD_ISSET(socks[i], &rset)) continue;
+        if (RTMP_NB_ERROR != serve_http(http)) continue;
         smax = cleanup_client(socks, i);
         nb_socks--;
     }
     LIST_FOREACH(c, &clients_head, next) {
         i = CLIENTIDX(c);
         if (-1 == socks[i] || !FD_ISSET(socks[i], &wset)) continue;
-        if (RTMP_NB_ERROR != RTMP_WriteQueued(active_contexts[i])) continue;
+        if (RTMP_NB_ERROR != RTMP_WriteQueued(&contexts[i])) continue;
+        smax = cleanup_client(socks, i);
+        nb_socks--;
+    }
+    LIST_FOREACH(http, &httpclients_head, next) {
+        i = HTTPIDX(http);
+        if (-1 == socks[i] || !FD_ISSET(socks[i], &wset)) continue;
+        if (RTMP_NB_ERROR != rtmpt_write(&http->rtmpt, &http->sb)) continue;
         smax = cleanup_client(socks, i);
         nb_socks--;
     }
